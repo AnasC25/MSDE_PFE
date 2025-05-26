@@ -114,8 +114,6 @@ def main():
             df_links = pd.read_excel(latest_file)
             print(f"✅ Fichier Excel lu avec succès. Colonnes trouvées : {df_links.columns.tolist()}")
             
-            # Limiter à 5 produits
-            df_links = df_links.head(5)
             total_products = len(df_links)
             print(f"📊 Nombre total de produits à traiter : {total_products}")
             
@@ -124,10 +122,6 @@ def main():
             
             # Traitement des produits
             for index, row in df_links.iterrows():
-                if index >= 5:  # Arrêt après 5 produits
-                    print("🛑 Limitation atteinte : 5 produits traités")
-                    break
-                    
                 browser = open_browser()
                 url = row['lien_du_produit']
                 print(f"\n🔄 Traitement du produit {index + 1}/{total_products}")
