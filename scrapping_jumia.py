@@ -15,6 +15,7 @@ import os
 from typing import List
 from functools import lru_cache
 import logging
+import boto3  # 🟢 Pour l’envoi vers AWS S3
 
 # Configuration du logging
 logging.basicConfig(
@@ -36,7 +37,6 @@ SAVE_INTERVAL = 100
 
 @lru_cache(maxsize=1)
 def get_chrome_options() -> Options:
-    """Retourne les options Chrome configurées."""
     chrome_options = Options()
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
@@ -45,13 +45,11 @@ def get_chrome_options() -> Options:
     return chrome_options
 
 def open_browser():
-    """Ouvre une instance du navigateur Chrome avec le ChromeDriver installé manuellement."""
     chrome_options = get_chrome_options()
     service = Service("/usr/local/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
 def scroll_page(browser: webdriver.Chrome) -> None:
-    """Défile la page pour charger tout le contenu."""
     last_height = browser.execute_script("return document.body.scrollHeight")
     for _ in range(SCROLL_ATTEMPTS):
         browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -62,7 +60,6 @@ def scroll_page(browser: webdriver.Chrome) -> None:
         last_height = new_height
 
 def extract_product_links(soup: BeautifulSoup) -> List[str]:
-    """Extrait les liens des produits d'une page."""
     return [
         f"{BASE_URL}{link['href']}" if not link['href'].startswith('http') else link['href']
         for article in soup.find_all("article", class_="prd")
@@ -70,7 +67,6 @@ def extract_product_links(soup: BeautifulSoup) -> List[str]:
     ]
 
 def process_page(page_url: str, browser: webdriver.Chrome) -> List[str]:
-    """Traite une page et extrait les liens des produits."""
     try:
         browser.get(page_url)
         time.sleep(WAIT_TIME)
@@ -87,14 +83,12 @@ def process_page(page_url: str, browser: webdriver.Chrome) -> List[str]:
         return []
 
 def save_intermediate_results(product_urls: List[str], page: int) -> None:
-    """Sauvegarde les résultats intermédiaires."""
     if len(product_urls) % SAVE_INTERVAL == 0:
         filename = f"jumia_products_links_intermediate_page{page}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         save_results(product_urls, filename)
         logger.info(f"Sauvegarde intermédiaire effectuée : {len(product_urls)} produits")
 
 def get_product_links(category_url: str) -> List[str]:
-    """Récupère les liens des produits d'une catégorie."""
     logger.info("Démarrage de la récupération des liens...")
     browser = open_browser()
     all_links = []
@@ -127,22 +121,29 @@ def get_product_links(category_url: str) -> List[str]:
     return all_links
 
 def save_results(product_urls: List[str], filename: str) -> None:
-    """Sauvegarde les résultats dans un fichier Excel."""
     scores = [len(product_urls) - i for i in range(len(product_urls))]
-
     df = pd.DataFrame({
         "lien_du_produit": product_urls,
         "score": scores
     })
-
     output_path = os.path.join(output_dir, filename)
     df.to_excel(output_path, index=False, engine='openpyxl')
     logger.info(f"{len(product_urls)} liens sauvegardés dans : {output_path}")
+    upload_to_s3(output_path)
+
+# 🟢 Fonction d’upload vers AWS S3
+def upload_to_s3(file_path, bucket_name="msde-pfe-blobs", s3_key=None):
+    s3 = boto3.client("s3")
+    if not s3_key:
+        s3_key = f"jumia/links/{os.path.basename(file_path)}"
+    try:
+        s3.upload_file(file_path, bucket_name, s3_key)
+        logger.info(f"✅ Fichier uploadé sur S3 : s3://{bucket_name}/{s3_key}")
+    except Exception as e:
+        logger.error(f"❌ Échec de l'upload S3 : {e}")
 
 def main():
-    """Fonction principale du script."""
     logger.info("=== DÉMARRAGE DU SCRAPING ===")
-
     category_url = "https://www.jumia.ma/beaute-hygiene-sante/"
     product_urls = get_product_links(category_url)
 
@@ -152,7 +153,6 @@ def main():
 
     filename = f"jumia_products_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     save_results(product_urls, filename)
-
     logger.info("=== FIN DU SCRIPT ===")
 
 if __name__ == "__main__":
