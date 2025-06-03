@@ -136,7 +136,8 @@ def get_product_links(browser, category_url):
             for element in elements:
                 if 'href' in element.attrs:
                     href = element['href']
-                    if '/produit-' in href:
+                    # Vérification si le lien est un lien de produit
+                    if '/produit-' in href or '.html' in href:
                         # Construction de l'URL complète si nécessaire
                         if not href.startswith('http'):
                             href = f"https://www.jumia.ma{href}"
@@ -162,7 +163,8 @@ def get_product_links(browser, category_url):
             for link in all_links:
                 if 'href' in link.attrs:
                     href = link['href']
-                    if '/produit-' in href:
+                    # Vérification si le lien est un lien de produit
+                    if '/produit-' in href or '.html' in href:
                         if not href.startswith('http'):
                             href = f"https://www.jumia.ma{href}"
                         product_links.append(href)
