@@ -4,22 +4,22 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
-import pandas as pd
-from datetime import datetime
-import time
-import traceback
 from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+from urllib.parse import urljoin
+import pandas as pd
+import tempfile
+import traceback
+import logging
+import boto3
+import datetime
 import re
 import os
-import tempfile
+import time
 from typing import List
-from functools import lru_cache
-import logging
-import boto3  # 🟢 Pour l'envoi vers AWS S3
-from urllib.parse import urljoin
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from selenium.common.exceptions import TimeoutException, WebDriverException
 
 # Configuration du logging
 logging.basicConfig(
@@ -45,20 +45,19 @@ MAX_WORKERS = 5
 @lru_cache(maxsize=1)
 def get_chrome_options() -> Options:
     chrome_options = Options()
+    chrome_options.add_argument('--headless=new')  # ✅ Important pour Snap Chromium
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--remote-debugging-port=9222')
     chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_argument('--window-size=1920,1080')
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-
-    # ✅ Ajout d'un répertoire temporaire pour éviter le conflit
-    temp_profile_dir = tempfile.mkdtemp()
-    chrome_options.add_argument(f'--user-data-dir={temp_profile_dir}')
-    
     return chrome_options
 
 def open_browser():
+    service = Service("/usr/bin/chromedriver")  # adapte si `which chromedriver` donne autre chose
     chrome_options = get_chrome_options()
-    service = Service("/usr/local/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
 def scroll_page(browser: webdriver.Chrome) -> None:
@@ -72,7 +71,7 @@ def scroll_page(browser: webdriver.Chrome) -> None:
                 break
             last_height = new_height
     except Exception as e:
-        logger.warning(f"Error during page scroll: {e}")
+        logger.warning(f"Erreur pendant le scroll : {e}")
 
 def extract_product_links(soup: BeautifulSoup) -> List[str]:
     links = []
@@ -81,57 +80,52 @@ def extract_product_links(soup: BeautifulSoup) -> List[str]:
             if link := article.find("a", class_="core"):
                 href = link.get('href')
                 if href:
-                    full_url = urljoin(BASE_URL, href)
-                    links.append(full_url)
+                    links.append(urljoin(BASE_URL, href))
     except Exception as e:
-        logger.error(f"Error extracting product links: {e}")
+        logger.error(f"Erreur lors de l'extraction des liens : {e}")
     return links
 
 def process_page(page_url: str, browser: webdriver.Chrome, retry_count: int = 0) -> List[str]:
     if retry_count >= MAX_RETRIES:
-        logger.error(f"Max retries reached for page {page_url}")
+        logger.error(f"Nombre max de tentatives atteint pour {page_url}")
         return []
 
     try:
         browser.get(page_url)
         time.sleep(WAIT_TIME)
 
-        try:
-            WebDriverWait(browser, TIMEOUT).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "prd"))
-            )
-        except TimeoutException:
-            logger.warning(f"Timeout waiting for products on page {page_url}")
-            return process_page(page_url, browser, retry_count + 1)
+        WebDriverWait(browser, TIMEOUT).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "prd"))
+        )
 
         scroll_page(browser)
         return extract_product_links(BeautifulSoup(browser.page_source, "lxml"))
 
-    except WebDriverException as e:
-        logger.error(f"WebDriver error on page {page_url}: {e}")
+    except (TimeoutException, WebDriverException) as e:
+        logger.warning(f"Erreur sur {page_url} : {e}. Nouvelle tentative...")
         return process_page(page_url, browser, retry_count + 1)
+
     except Exception as e:
-        logger.error(f"Unexpected error processing page {page_url}: {e}")
+        logger.error(f"Erreur inattendue : {e}")
         return []
 
 def process_page_batch(page_urls: List[str], browser: webdriver.Chrome) -> List[str]:
     all_links = []
-    for page_url in page_urls:
-        if links := process_page(page_url, browser):
-            all_links.extend(links)
+    for url in page_urls:
+        all_links.extend(process_page(url, browser))
     return all_links
 
 def save_intermediate_results(product_urls: List[str], page: int) -> None:
     if len(product_urls) % SAVE_INTERVAL == 0:
-        filename = f"jumia_products_links_intermediate_page{page}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        filename = f"jumia_products_links_intermediate_page{page}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         save_results(product_urls, filename)
-        logger.info(f"Sauvegarde intermédiaire effectuée : {len(product_urls)} produits")
+        logger.info(f"✅ Sauvegarde intermédiaire : {len(product_urls)} liens.")
 
 def get_product_links(category_url: str) -> List[str]:
-    logger.info("Starting link collection...")
+    logger.info("🔍 Lancement de la collecte des liens produits...")
     browser = open_browser()
     if not browser:
-        logger.error("Failed to initialize browser")
+        logger.error("❌ Échec de l'initialisation du navigateur.")
         return []
 
     all_links = []
@@ -143,17 +137,17 @@ def get_product_links(category_url: str) -> List[str]:
             futures = []
             for i in range(0, len(page_urls), MAX_WORKERS):
                 batch = page_urls[i:i + MAX_WORKERS]
-                future = executor.submit(process_page_batch, batch, browser)
-                futures.append(future)
+                futures.append(executor.submit(process_page_batch, batch, browser))
 
             for future in as_completed(futures):
-                if batch_links := future.result():
-                    all_links.extend(batch_links)
-                    logger.info(f"Total links collected: {len(all_links)}")
+                result = future.result()
+                if result:
+                    all_links.extend(result)
+                    logger.info(f"📦 Total actuel : {len(all_links)} liens collectés.")
                     save_intermediate_results(all_links, len(all_links) // SAVE_INTERVAL)
 
     except Exception as e:
-        logger.error(f"Error during link collection: {e}")
+        logger.error(f"❌ Erreur pendant la collecte : {e}")
         logger.error(traceback.format_exc())
     finally:
         browser.quit()
@@ -168,32 +162,31 @@ def save_results(product_urls: List[str], filename: str) -> None:
     })
     output_path = os.path.join(output_dir, filename)
     df.to_excel(output_path, index=False, engine='openpyxl')
-    logger.info(f"{len(product_urls)} liens sauvegardés dans : {output_path}")
+    logger.info(f"💾 {len(product_urls)} liens sauvegardés dans : {output_path}")
     upload_to_s3(output_path)
 
-# 🟢 Fonction d'upload vers AWS S3
 def upload_to_s3(file_path, bucket_name="msde-pfe-blobs", s3_key=None):
     s3 = boto3.client("s3")
     if not s3_key:
         s3_key = f"jumia/links/{os.path.basename(file_path)}"
     try:
         s3.upload_file(file_path, bucket_name, s3_key)
-        logger.info(f"✅ Fichier uploadé sur S3 : s3://{bucket_name}/{s3_key}")
+        logger.info(f"☁️ Fichier envoyé vers S3 : s3://{bucket_name}/{s3_key}")
     except Exception as e:
-        logger.error(f"❌ Échec de l'upload S3 : {e}")
+        logger.error(f"❌ Échec de l'envoi vers S3 : {e}")
 
 def main():
-    logger.info("=== DÉMARRAGE DU SCRAPING ===")
+    logger.info("🚀 === DÉMARRAGE DU SCRAPING ===")
     category_url = "https://www.jumia.ma/beaute-hygiene-sante/"
     product_urls = get_product_links(category_url)
 
     if not product_urls:
-        logger.error("Aucun lien de produit trouvé. Arrêt du script.")
+        logger.error("❌ Aucun produit trouvé. Fin du script.")
         return
 
-    filename = f"jumia_products_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = f"jumia_products_links_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     save_results(product_urls, filename)
-    logger.info("=== FIN DU SCRIPT ===")
+    logger.info("✅ === FIN DU SCRAPING ===")
 
 if __name__ == "__main__":
     main()

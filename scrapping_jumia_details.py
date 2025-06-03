@@ -3,26 +3,30 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
 from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime
-import time
 import traceback
-from selenium.webdriver.chrome.options import Options
+import time
 import os
-import boto3  # ⬅️ Pour l'envoi vers S3
+import boto3
 
 # === Fonction pour ouvrir le navigateur ===
 def open_browser():
     try:
         chrome_options = Options()
-        # chrome_options.add_argument('--headless')  # Décommenter si tu veux cacher le navigateur
+        chrome_options.add_argument('--headless=new')  # ✅ Headless mode recommandé pour Snap Chromium
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--remote-debugging-port=9222')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-        service = Service("/usr/local/bin/chromedriver")
+        service = Service("/usr/bin/chromedriver")  # adapte si `which chromedriver` donne autre chose
         return webdriver.Chrome(service=service, options=chrome_options)
     except Exception as e:
         print(f"❌ Erreur lors de l'initialisation du navigateur : {e}")
@@ -53,7 +57,7 @@ def get_product_details(url, browser):
         prix_barre = soup.find("span", class_="-tal -gy5 -lthr -fs16 -pvxs -ubpt")
         prix_barre = prix_barre.text.strip() if prix_barre else "Non disponible"
 
-        image = soup.find("img", class_="#imgs > a > img")
+        image = soup.select_one("#imgs img")
         image_url = image['src'] if image and 'src' in image.attrs else "Non disponible"
 
         return {
