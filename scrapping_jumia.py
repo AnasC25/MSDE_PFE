@@ -19,7 +19,9 @@ import datetime
 import re
 import os
 import time
-from typing import List
+from typing import List, Set
+from queue import Queue
+from threading import Lock
 
 # Configuration du logging
 logging.basicConfig(
@@ -33,30 +35,49 @@ output_dir = "jumia_product_link"
 os.makedirs(output_dir, exist_ok=True)
 
 # Constantes
-MAX_PAGES = 1000
+MAX_PAGES = 10000
 SCROLL_ATTEMPTS = 3
-WAIT_TIME = 3
+WAIT_TIME = 2  # Réduit pour optimiser la vitesse
 BASE_URL = "https://www.jumia.ma"
-SAVE_INTERVAL = 100
 MAX_RETRIES = 3
-TIMEOUT = 20
-MAX_WORKERS = 5
+TIMEOUT = 15  # Réduit pour optimiser la vitesse
+MAX_WORKERS = 8  # Augmenté pour plus de parallélisme
+BATCH_SIZE = 50  # Taille des lots pour le traitement
+
+# Structure de données thread-safe pour stocker les liens
+class ThreadSafeLinkStorage:
+    def __init__(self):
+        self._links: Set[str] = set()
+        self._lock = Lock()
+    
+    def add_links(self, links: List[str]):
+        with self._lock:
+            self._links.update(links)
+    
+    def get_all_links(self) -> List[str]:
+        with self._lock:
+            return list(self._links)
+    
+    def get_count(self) -> int:
+        with self._lock:
+            return len(self._links)
+
+link_storage = ThreadSafeLinkStorage()
 
 @lru_cache(maxsize=1)
 def get_chrome_options() -> Options:
     chrome_options = Options()
-    chrome_options.add_argument('--headless=new')  # ✅ Important pour Snap Chromium
+    chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--remote-debugging-port=9222')
     chrome_options.add_argument('--disable-blink-features=AutomationControlled')
     chrome_options.add_argument('--window-size=1920,1080')
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     return chrome_options
 
 def open_browser():
-    service = Service("/usr/bin/chromedriver")  # adapte si `which chromedriver` donne autre chose
+    service = Service("/usr/bin/chromedriver")
     chrome_options = get_chrome_options()
     return webdriver.Chrome(service=service, options=chrome_options)
 
@@ -65,7 +86,7 @@ def scroll_page(browser: webdriver.Chrome) -> None:
         last_height = browser.execute_script("return document.body.scrollHeight")
         for _ in range(SCROLL_ATTEMPTS):
             browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1)
+            time.sleep(0.5)  # Réduit pour optimiser la vitesse
             new_height = browser.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
                 break
@@ -112,46 +133,11 @@ def process_page(page_url: str, browser: webdriver.Chrome, retry_count: int = 0)
 def process_page_batch(page_urls: List[str], browser: webdriver.Chrome) -> List[str]:
     all_links = []
     for url in page_urls:
-        all_links.extend(process_page(url, browser))
-    return all_links
-
-def save_intermediate_results(product_urls: List[str], page: int) -> None:
-    if len(product_urls) % SAVE_INTERVAL == 0:
-        filename = f"jumia_products_links_intermediate_page{page}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        save_results(product_urls, filename)
-        logger.info(f"✅ Sauvegarde intermédiaire : {len(product_urls)} liens.")
-
-def get_product_links(category_url: str) -> List[str]:
-    logger.info("🔍 Lancement de la collecte des liens produits...")
-    browser = open_browser()
-    if not browser:
-        logger.error("❌ Échec de l'initialisation du navigateur.")
-        return []
-
-    all_links = []
-    try:
-        base_url = re.sub(r'\?page=\d+', '', category_url)
-        page_urls = [f"{base_url}?page={page}" for page in range(1, MAX_PAGES + 1)]
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = []
-            for i in range(0, len(page_urls), MAX_WORKERS):
-                batch = page_urls[i:i + MAX_WORKERS]
-                futures.append(executor.submit(process_page_batch, batch, browser))
-
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    all_links.extend(result)
-                    logger.info(f"📦 Total actuel : {len(all_links)} liens collectés.")
-                    save_intermediate_results(all_links, len(all_links) // SAVE_INTERVAL)
-
-    except Exception as e:
-        logger.error(f"❌ Erreur pendant la collecte : {e}")
-        logger.error(traceback.format_exc())
-    finally:
-        browser.quit()
-
+        links = process_page(url, browser)
+        if links:
+            all_links.extend(links)
+            link_storage.add_links(links)
+            logger.info(f"📦 Total actuel : {link_storage.get_count()} liens collectés.")
     return all_links
 
 def save_results(product_urls: List[str], filename: str) -> None:
@@ -174,6 +160,37 @@ def upload_to_s3(file_path, bucket_name="msde-pfe-blobs", s3_key=None):
         logger.info(f"☁️ Fichier envoyé vers S3 : s3://{bucket_name}/{s3_key}")
     except Exception as e:
         logger.error(f"❌ Échec de l'envoi vers S3 : {e}")
+
+def get_product_links(category_url: str) -> List[str]:
+    logger.info("🔍 Lancement de la collecte des liens produits...")
+    browser = open_browser()
+    if not browser:
+        logger.error("❌ Échec de l'initialisation du navigateur.")
+        return []
+
+    try:
+        base_url = re.sub(r'\?page=\d+', '', category_url)
+        page_urls = [f"{base_url}?page={page}" for page in range(1, MAX_PAGES + 1)]
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = []
+            for i in range(0, len(page_urls), BATCH_SIZE):
+                batch = page_urls[i:i + BATCH_SIZE]
+                futures.append(executor.submit(process_page_batch, batch, browser))
+
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Erreur dans le traitement d'un lot : {e}")
+
+    except Exception as e:
+        logger.error(f"❌ Erreur pendant la collecte : {e}")
+        logger.error(traceback.format_exc())
+    finally:
+        browser.quit()
+
+    return link_storage.get_all_links()
 
 def main():
     logger.info("🚀 === DÉMARRAGE DU SCRAPING ===")
