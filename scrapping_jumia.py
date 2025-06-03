@@ -78,9 +78,9 @@ def get_product_links(browser, category_url):
             try:
                 # Attente pour différents sélecteurs possibles
                 selectors = [
-                    (By.CSS_SELECTOR, "article.prd"),
-                    (By.CSS_SELECTOR, "div.crs.row a.core"),
-                    (By.CSS_SELECTOR, "div.itm.col a[href*='/produit-']")
+                    (By.CSS_SELECTOR, "article.prd._fb._spn.c-prd.col"),
+                    (By.CSS_SELECTOR, "article.prd a.core"),
+                    (By.CSS_SELECTOR, "a.core[href*='.html']")
                 ]
                 
                 for selector_type, selector in selectors:
@@ -123,10 +123,9 @@ def get_product_links(browser, category_url):
         
         # Sélecteurs possibles pour les liens de produits
         selectors = [
-            "div.crs.row a.core",
-            "div.itm.col a[href*='/produit-']",
+            "article.prd._fb._spn.c-prd.col a.core",
             "article.prd a.core",
-            "a[href*='/produit-']"
+            "a.core[href*='.html']"
         ]
         
         for selector in selectors:
@@ -136,13 +135,11 @@ def get_product_links(browser, category_url):
             for element in elements:
                 if 'href' in element.attrs:
                     href = element['href']
-                    # Vérification si le lien est un lien de produit
-                    if '/produit-' in href or '.html' in href:
-                        # Construction de l'URL complète si nécessaire
-                        if not href.startswith('http'):
-                            href = f"https://www.jumia.ma{href}"
-                        product_links.add(href)
-                        logger.debug(f"Lien trouvé : {href}")
+                    # Construction de l'URL complète si nécessaire
+                    if not href.startswith('http'):
+                        href = f"https://www.jumia.ma{href}"
+                    product_links.add(href)
+                    logger.debug(f"Lien trouvé : {href}")
 
         # Conversion en liste et tri
         product_links = list(product_links)
@@ -157,18 +154,16 @@ def get_product_links(browser, category_url):
             logger.warning("Aucun lien trouvé avec les sélecteurs standards, tentative avec une approche alternative...")
             
             # Recherche de tous les liens dans la page
-            all_links = soup.find_all('a')
+            all_links = soup.find_all('a', class_='core')
             logger.info(f"Nombre total de liens trouvés dans la page : {len(all_links)}")
             
             for link in all_links:
                 if 'href' in link.attrs:
                     href = link['href']
-                    # Vérification si le lien est un lien de produit
-                    if '/produit-' in href or '.html' in href:
-                        if not href.startswith('http'):
-                            href = f"https://www.jumia.ma{href}"
-                        product_links.append(href)
-                        logger.debug(f"Lien trouvé (approche alternative) : {href}")
+                    if not href.startswith('http'):
+                        href = f"https://www.jumia.ma{href}"
+                    product_links.append(href)
+                    logger.debug(f"Lien trouvé (approche alternative) : {href}")
             
             product_links = list(set(product_links))  # Suppression des doublons
             product_links.sort()
