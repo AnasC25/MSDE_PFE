@@ -15,7 +15,10 @@ import os
 from typing import List
 from functools import lru_cache
 import logging
-import boto3  # 🟢 Pour l’envoi vers AWS S3
+import boto3  # 🟢 Pour l'envoi vers AWS S3
+from urllib.parse import urljoin
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 # Configuration du logging
 logging.basicConfig(
@@ -34,6 +37,9 @@ SCROLL_ATTEMPTS = 3
 WAIT_TIME = 3
 BASE_URL = "https://www.jumia.ma"
 SAVE_INTERVAL = 100
+MAX_RETRIES = 3
+TIMEOUT = 20
+MAX_WORKERS = 5
 
 @lru_cache(maxsize=1)
 def get_chrome_options() -> Options:
@@ -50,37 +56,64 @@ def open_browser():
     return webdriver.Chrome(service=service, options=chrome_options)
 
 def scroll_page(browser: webdriver.Chrome) -> None:
-    last_height = browser.execute_script("return document.body.scrollHeight")
-    for _ in range(SCROLL_ATTEMPTS):
-        browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1)
-        new_height = browser.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            break
-        last_height = new_height
+    try:
+        last_height = browser.execute_script("return document.body.scrollHeight")
+        for _ in range(SCROLL_ATTEMPTS):
+            browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1)
+            new_height = browser.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height
+    except Exception as e:
+        logger.warning(f"Error during page scroll: {e}")
 
 def extract_product_links(soup: BeautifulSoup) -> List[str]:
-    return [
-        f"{BASE_URL}{link['href']}" if not link['href'].startswith('http') else link['href']
-        for article in soup.find_all("article", class_="prd")
-        if (link := article.find("a", class_="core")) and 'href' in link.attrs
-    ]
+    links = []
+    try:
+        for article in soup.find_all("article", class_="prd"):
+            if link := article.find("a", class_="core"):
+                href = link.get('href')
+                if href:
+                    full_url = urljoin(BASE_URL, href)
+                    links.append(full_url)
+    except Exception as e:
+        logger.error(f"Error extracting product links: {e}")
+    return links
 
-def process_page(page_url: str, browser: webdriver.Chrome) -> List[str]:
+def process_page(page_url: str, browser: webdriver.Chrome, retry_count: int = 0) -> List[str]:
+    if retry_count >= MAX_RETRIES:
+        logger.error(f"Max retries reached for page {page_url}")
+        return []
+
     try:
         browser.get(page_url)
         time.sleep(WAIT_TIME)
 
-        WebDriverWait(browser, 20).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "prd"))
-        )
+        try:
+            WebDriverWait(browser, TIMEOUT).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "prd"))
+            )
+        except TimeoutException:
+            logger.warning(f"Timeout waiting for products on page {page_url}")
+            return process_page(page_url, browser, retry_count + 1)
 
         scroll_page(browser)
         return extract_product_links(BeautifulSoup(browser.page_source, "lxml"))
 
+    except WebDriverException as e:
+        logger.error(f"WebDriver error on page {page_url}: {e}")
+        return process_page(page_url, browser, retry_count + 1)
     except Exception as e:
-        logger.warning(f"Erreur lors du traitement de la page {page_url}: {e}")
+        logger.error(f"Unexpected error processing page {page_url}: {e}")
         return []
+
+def process_page_batch(page_urls: List[str], browser: webdriver.Chrome) -> List[str]:
+    all_links = []
+    for page_url in page_urls:
+        if links := process_page(page_url, browser):
+            all_links.extend(links)
+    return all_links
 
 def save_intermediate_results(product_urls: List[str], page: int) -> None:
     if len(product_urls) % SAVE_INTERVAL == 0:
@@ -89,31 +122,33 @@ def save_intermediate_results(product_urls: List[str], page: int) -> None:
         logger.info(f"Sauvegarde intermédiaire effectuée : {len(product_urls)} produits")
 
 def get_product_links(category_url: str) -> List[str]:
-    logger.info("Démarrage de la récupération des liens...")
+    logger.info("Starting link collection...")
     browser = open_browser()
-    all_links = []
+    if not browser:
+        logger.error("Failed to initialize browser")
+        return []
 
+    all_links = []
     try:
         base_url = re.sub(r'\?page=\d+', '', category_url)
+        page_urls = [f"{base_url}?page={page}" for page in range(1, MAX_PAGES + 1)]
 
-        for page in range(1, MAX_PAGES + 1):
-            page_url = f"{base_url}?page={page}"
-            logger.info(f"Traitement de la page {page}")
+        # Process pages in batches using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = []
+            for i in range(0, len(page_urls), MAX_WORKERS):
+                batch = page_urls[i:i + MAX_WORKERS]
+                future = executor.submit(process_page_batch, batch, browser)
+                futures.append(future)
 
-            if page_links := process_page(page_url, browser):
-                all_links.extend(page_links)
-                logger.info(f"{len(page_links)} liens récupérés sur la page {page}")
-                logger.info(f"Total des liens récupérés : {len(all_links)}")
-
-                save_intermediate_results(all_links, page)
-            else:
-                logger.info("Fin de la pagination - Plus de produits trouvés")
-                break
-
-            time.sleep(WAIT_TIME)
+            for future in as_completed(futures):
+                if batch_links := future.result():
+                    all_links.extend(batch_links)
+                    logger.info(f"Total links collected: {len(all_links)}")
+                    save_intermediate_results(all_links, len(all_links) // SAVE_INTERVAL)
 
     except Exception as e:
-        logger.error(f"Erreur lors de la récupération des liens : {e}")
+        logger.error(f"Error during link collection: {e}")
         logger.error(traceback.format_exc())
     finally:
         browser.quit()
@@ -131,7 +166,7 @@ def save_results(product_urls: List[str], filename: str) -> None:
     logger.info(f"{len(product_urls)} liens sauvegardés dans : {output_path}")
     upload_to_s3(output_path)
 
-# 🟢 Fonction d’upload vers AWS S3
+# 🟢 Fonction d'upload vers AWS S3
 def upload_to_s3(file_path, bucket_name="msde-pfe-blobs", s3_key=None):
     s3 = boto3.client("s3")
     if not s3_key:
