@@ -12,6 +12,7 @@ import traceback
 from selenium.webdriver.chrome.options import Options
 import re
 import os
+import tempfile
 from typing import List
 from functools import lru_cache
 import logging
@@ -48,6 +49,11 @@ def get_chrome_options() -> Options:
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-blink-features=AutomationControlled')
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+    # ✅ Ajout d'un répertoire temporaire pour éviter le conflit
+    temp_profile_dir = tempfile.mkdtemp()
+    chrome_options.add_argument(f'--user-data-dir={temp_profile_dir}')
+    
     return chrome_options
 
 def open_browser():
@@ -133,7 +139,6 @@ def get_product_links(category_url: str) -> List[str]:
         base_url = re.sub(r'\?page=\d+', '', category_url)
         page_urls = [f"{base_url}?page={page}" for page in range(1, MAX_PAGES + 1)]
 
-        # Process pages in batches using ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = []
             for i in range(0, len(page_urls), MAX_WORKERS):
