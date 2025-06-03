@@ -76,9 +76,22 @@ def get_product_links(browser, category_url):
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                WebDriverWait(browser, 20).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "prd"))
-                )
+                # Attente pour différents sélecteurs possibles
+                selectors = [
+                    (By.CSS_SELECTOR, "article.prd"),
+                    (By.CSS_SELECTOR, "div.crs.row a.core"),
+                    (By.CSS_SELECTOR, "div.itm.col a[href*='/produit-']")
+                ]
+                
+                for selector_type, selector in selectors:
+                    try:
+                        WebDriverWait(browser, 10).until(
+                            EC.presence_of_element_located((selector_type, selector))
+                        )
+                        logger.info(f"Élément trouvé avec le sélecteur : {selector}")
+                        break
+                    except TimeoutException:
+                        continue
                 break
             except TimeoutException:
                 if attempt == max_retries - 1:
@@ -89,22 +102,51 @@ def get_product_links(browser, category_url):
 
         # Scroll progressif pour charger tous les produits
         last_height = browser.execute_script("return document.body.scrollHeight")
-        while True:
+        scroll_attempts = 0
+        max_scroll_attempts = 5
+
+        while scroll_attempts < max_scroll_attempts:
             browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(2)
             new_height = browser.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
                 break
             last_height = new_height
+            scroll_attempts += 1
 
-        soup = BeautifulSoup(browser.page_source, "lxml")
-        product_links = []
+        # Récupération du contenu de la page
+        page_source = browser.page_source
+        soup = BeautifulSoup(page_source, "lxml")
+        
+        # Essai de différents sélecteurs pour trouver les liens
+        product_links = set()  # Utilisation d'un set pour éviter les doublons
+        
+        # Sélecteurs possibles pour les liens de produits
+        selectors = [
+            "div.crs.row a.core",
+            "div.itm.col a[href*='/produit-']",
+            "article.prd a.core",
+            "a[href*='/produit-']"
+        ]
+        
+        for selector in selectors:
+            elements = soup.select(selector)
+            for element in elements:
+                if 'href' in element.attrs:
+                    href = element['href']
+                    if '/produit-' in href:
+                        # Construction de l'URL complète si nécessaire
+                        if not href.startswith('http'):
+                            href = f"https://www.jumia.ma{href}"
+                        product_links.add(href)
 
-        for product in soup.select("a.prd"):
-            if 'href' in product.attrs:
-                product_links.append(product['href'])
+        # Conversion en liste et tri
+        product_links = list(product_links)
+        product_links.sort()
 
         logger.info(f"✅ {len(product_links)} liens trouvés")
+        if len(product_links) > 0:
+            logger.info(f"Premier lien trouvé : {product_links[0]}")
         return product_links
     except Exception as e:
         logger.error(f"Erreur lors de la récupération des liens : {e}")
