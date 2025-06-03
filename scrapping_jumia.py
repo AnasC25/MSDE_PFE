@@ -69,109 +69,142 @@ def get_product_links(browser, category_url):
     """Récupère les liens des produits d'une catégorie."""
     try:
         logger.info(f"Récupération des liens depuis : {category_url}")
-        browser.get(category_url)
-        time.sleep(5)  # Augmentation du temps d'attente initial
-
-        # Attente explicite pour le chargement des produits avec plusieurs tentatives
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                # Attente pour différents sélecteurs possibles
-                selectors = [
-                    (By.CSS_SELECTOR, "article.prd._fb._spn.c-prd.col"),
-                    (By.CSS_SELECTOR, "article.prd a.core"),
-                    (By.CSS_SELECTOR, "a.core[href*='.html']")
-                ]
-                
-                for selector_type, selector in selectors:
-                    try:
-                        WebDriverWait(browser, 10).until(
-                            EC.presence_of_element_located((selector_type, selector))
-                        )
-                        logger.info(f"Élément trouvé avec le sélecteur : {selector}")
-                        break
-                    except TimeoutException:
-                        continue
-                break
-            except TimeoutException:
-                if attempt == max_retries - 1:
-                    raise
-                logger.warning(f"Tentative {attempt + 1} échouée, nouvelle tentative...")
-                browser.refresh()
-                time.sleep(5)
-
-        # Scroll progressif pour charger tous les produits
-        last_height = browser.execute_script("return document.body.scrollHeight")
-        scroll_attempts = 0
-        max_scroll_attempts = 5
-
-        while scroll_attempts < max_scroll_attempts:
-            browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-            new_height = browser.execute_script("return document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
-            scroll_attempts += 1
-
-        # Récupération du contenu de la page
-        page_source = browser.page_source
-        soup = BeautifulSoup(page_source, "lxml")
+        all_product_links = set()  # Pour stocker tous les liens de toutes les pages
+        current_page = 1
+        max_pages = 50  # Limite de sécurité pour éviter une boucle infinie
         
-        # Essai de différents sélecteurs pour trouver les liens
-        product_links = set()  # Utilisation d'un set pour éviter les doublons
-        
-        # Sélecteurs possibles pour les liens de produits
-        selectors = [
-            "article.prd._fb._spn.c-prd.col a.core",
-            "article.prd a.core",
-            "a.core[href*='.html']"
-        ]
-        
-        for selector in selectors:
-            elements = soup.select(selector)
-            logger.info(f"Trouvé {len(elements)} éléments avec le sélecteur : {selector}")
+        while current_page <= max_pages:
+            # Construction de l'URL avec la pagination
+            page_url = f"{category_url}?page={current_page}" if current_page > 1 else category_url
+            logger.info(f"Traitement de la page {current_page} : {page_url}")
             
-            for element in elements:
-                if 'href' in element.attrs:
-                    href = element['href']
-                    # Construction de l'URL complète si nécessaire
-                    if not href.startswith('http'):
-                        href = f"https://www.jumia.ma{href}"
-                    product_links.add(href)
-                    logger.debug(f"Lien trouvé : {href}")
+            browser.get(page_url)
+            time.sleep(5)  # Augmentation du temps d'attente initial
+
+            # Attente explicite pour le chargement des produits avec plusieurs tentatives
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Attente pour différents sélecteurs possibles
+                    selectors = [
+                        (By.CSS_SELECTOR, "article.prd._fb._spn.c-prd.col"),
+                        (By.CSS_SELECTOR, "article.prd a.core"),
+                        (By.CSS_SELECTOR, "a.core[href*='.html']")
+                    ]
+                    
+                    for selector_type, selector in selectors:
+                        try:
+                            WebDriverWait(browser, 10).until(
+                                EC.presence_of_element_located((selector_type, selector))
+                            )
+                            logger.info(f"Élément trouvé avec le sélecteur : {selector}")
+                            break
+                        except TimeoutException:
+                            continue
+                    break
+                except TimeoutException:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"Tentative {attempt + 1} échouée, nouvelle tentative...")
+                    browser.refresh()
+                    time.sleep(5)
+
+            # Scroll progressif pour charger tous les produits
+            last_height = browser.execute_script("return document.body.scrollHeight")
+            scroll_attempts = 0
+            max_scroll_attempts = 5
+
+            while scroll_attempts < max_scroll_attempts:
+                browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(2)
+                new_height = browser.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
+                scroll_attempts += 1
+
+            # Récupération du contenu de la page
+            page_source = browser.page_source
+            soup = BeautifulSoup(page_source, "lxml")
+            
+            # Essai de différents sélecteurs pour trouver les liens
+            page_product_links = set()  # Pour les liens de la page courante
+            
+            # Sélecteurs possibles pour les liens de produits
+            selectors = [
+                "article.prd._fb._spn.c-prd.col a.core",
+                "article.prd a.core",
+                "a.core[href*='.html']"
+            ]
+            
+            for selector in selectors:
+                elements = soup.select(selector)
+                logger.info(f"Trouvé {len(elements)} éléments avec le sélecteur : {selector}")
+                
+                for element in elements:
+                    if 'href' in element.attrs:
+                        href = element['href']
+                        # Construction de l'URL complète si nécessaire
+                        if not href.startswith('http'):
+                            href = f"https://www.jumia.ma{href}"
+                        page_product_links.add(href)
+                        logger.debug(f"Lien trouvé : {href}")
+
+            # Si aucun lien n'est trouvé sur la page, on essaie l'approche alternative
+            if not page_product_links:
+                logger.warning("Aucun lien trouvé avec les sélecteurs standards, tentative avec une approche alternative...")
+                
+                # Recherche de tous les liens dans la page
+                all_links = soup.find_all('a', class_='core')
+                logger.info(f"Nombre total de liens trouvés dans la page : {len(all_links)}")
+                
+                for link in all_links:
+                    if 'href' in link.attrs:
+                        href = link['href']
+                        if not href.startswith('http'):
+                            href = f"https://www.jumia.ma{href}"
+                        page_product_links.add(href)
+                        logger.debug(f"Lien trouvé (approche alternative) : {href}")
+
+            # Si aucun lien n'est trouvé sur cette page, on arrête la pagination
+            if not page_product_links:
+                logger.info(f"Aucun lien trouvé sur la page {current_page}, fin de la pagination.")
+                break
+
+            # Ajout des liens de la page courante à l'ensemble total
+            all_product_links.update(page_product_links)
+            logger.info(f"✅ {len(page_product_links)} liens trouvés sur la page {current_page}")
+            logger.info(f"Total cumulé : {len(all_product_links)} liens")
+
+            # Vérification si on a atteint la dernière page
+            next_page = soup.select_one("a[aria-label='Page suivante']")
+            if not next_page:
+                logger.info("Pas de page suivante trouvée, fin de la pagination.")
+                break
+
+            # Vérification du numéro de la dernière page
+            last_page_link = soup.select_one("a[aria-label='Dernière page']")
+            if last_page_link:
+                try:
+                    last_page = int(last_page_link.text.strip())
+                    logger.info(f"Dernière page disponible : {last_page}")
+                    if current_page >= last_page:
+                        logger.info("Dernière page atteinte.")
+                        break
+                except ValueError:
+                    pass
+
+            current_page += 1
+            time.sleep(2)  # Pause entre les pages
 
         # Conversion en liste et tri
-        product_links = list(product_links)
+        product_links = list(all_product_links)
         product_links.sort()
 
-        logger.info(f"✅ {len(product_links)} liens trouvés")
+        logger.info(f"✅ Total final : {len(product_links)} liens trouvés sur {current_page - 1} pages")
         if len(product_links) > 0:
             logger.info(f"Premier lien trouvé : {product_links[0]}")
             logger.info(f"Dernier lien trouvé : {product_links[-1]}")
-        else:
-            # Si aucun lien n'est trouvé, on essaie une approche différente
-            logger.warning("Aucun lien trouvé avec les sélecteurs standards, tentative avec une approche alternative...")
-            
-            # Recherche de tous les liens dans la page
-            all_links = soup.find_all('a', class_='core')
-            logger.info(f"Nombre total de liens trouvés dans la page : {len(all_links)}")
-            
-            for link in all_links:
-                if 'href' in link.attrs:
-                    href = link['href']
-                    if not href.startswith('http'):
-                        href = f"https://www.jumia.ma{href}"
-                    product_links.append(href)
-                    logger.debug(f"Lien trouvé (approche alternative) : {href}")
-            
-            product_links = list(set(product_links))  # Suppression des doublons
-            product_links.sort()
-            
-            logger.info(f"✅ {len(product_links)} liens trouvés avec l'approche alternative")
-            if len(product_links) > 0:
-                logger.info(f"Premier lien trouvé : {product_links[0]}")
-                logger.info(f"Dernier lien trouvé : {product_links[-1]}")
 
         return product_links
     except Exception as e:
