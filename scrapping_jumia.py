@@ -14,6 +14,7 @@ import logging
 import tempfile
 import boto3
 from botocore.config import Config
+from selenium.common.exceptions import TimeoutException
 
 # Configuration du logging
 logging.basicConfig(
@@ -39,11 +40,27 @@ def open_browser():
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--start-maximized')
+        chrome_options.add_argument('--ignore-certificate-errors')
+        chrome_options.add_argument('--allow-running-insecure-content')
+        chrome_options.add_argument('--disable-web-security')
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         chrome_options.add_argument(f'--user-data-dir={tempfile.mkdtemp()}')
 
+        # Ajout d'experimental options pour éviter la détection
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
         service = Service("/usr/local/bin/chromedriver")
-        return webdriver.Chrome(service=service, options=chrome_options)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Modification des propriétés du navigateur pour éviter la détection
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        return driver
     except Exception as e:
         logger.error(f"Erreur navigateur : {e}")
         raise
@@ -53,11 +70,32 @@ def get_product_links(browser, category_url):
     try:
         logger.info(f"Récupération des liens depuis : {category_url}")
         browser.get(category_url)
-        time.sleep(3)
+        time.sleep(5)  # Augmentation du temps d'attente initial
 
-        WebDriverWait(browser, 20).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "prd"))
-        )
+        # Attente explicite pour le chargement des produits avec plusieurs tentatives
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                WebDriverWait(browser, 20).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "prd"))
+                )
+                break
+            except TimeoutException:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning(f"Tentative {attempt + 1} échouée, nouvelle tentative...")
+                browser.refresh()
+                time.sleep(5)
+
+        # Scroll progressif pour charger tous les produits
+        last_height = browser.execute_script("return document.body.scrollHeight")
+        while True:
+            browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            new_height = browser.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height
 
         soup = BeautifulSoup(browser.page_source, "lxml")
         product_links = []
@@ -70,6 +108,7 @@ def get_product_links(browser, category_url):
         return product_links
     except Exception as e:
         logger.error(f"Erreur lors de la récupération des liens : {e}")
+        logger.error(traceback.format_exc())
         return []
 
 def get_product_details(url, browser):
@@ -128,8 +167,7 @@ def main():
     try:
         # Liste des catégories à scraper
         categories = [
-            "https://www.jumia.ma/categorie-beaute/",
-            "https://www.jumia.ma/categorie-parfums/"
+            "https://www.jumia.ma/categorie-beaute/"
         ]
 
         all_products = []
