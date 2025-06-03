@@ -167,7 +167,7 @@ def main():
     try:
         # Liste des catégories à scraper
         categories = [
-            "https://www.jumia.ma/categorie-beaute/"
+            "https://www.jumia.ma/beaute-hygiene-sante/"
         ]
 
         all_products = []
