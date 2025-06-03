@@ -131,6 +131,8 @@ def get_product_links(browser, category_url):
         
         for selector in selectors:
             elements = soup.select(selector)
+            logger.info(f"Trouvé {len(elements)} éléments avec le sélecteur : {selector}")
+            
             for element in elements:
                 if 'href' in element.attrs:
                     href = element['href']
@@ -139,6 +141,7 @@ def get_product_links(browser, category_url):
                         if not href.startswith('http'):
                             href = f"https://www.jumia.ma{href}"
                         product_links.add(href)
+                        logger.debug(f"Lien trouvé : {href}")
 
         # Conversion en liste et tri
         product_links = list(product_links)
@@ -147,6 +150,32 @@ def get_product_links(browser, category_url):
         logger.info(f"✅ {len(product_links)} liens trouvés")
         if len(product_links) > 0:
             logger.info(f"Premier lien trouvé : {product_links[0]}")
+            logger.info(f"Dernier lien trouvé : {product_links[-1]}")
+        else:
+            # Si aucun lien n'est trouvé, on essaie une approche différente
+            logger.warning("Aucun lien trouvé avec les sélecteurs standards, tentative avec une approche alternative...")
+            
+            # Recherche de tous les liens dans la page
+            all_links = soup.find_all('a')
+            logger.info(f"Nombre total de liens trouvés dans la page : {len(all_links)}")
+            
+            for link in all_links:
+                if 'href' in link.attrs:
+                    href = link['href']
+                    if '/produit-' in href:
+                        if not href.startswith('http'):
+                            href = f"https://www.jumia.ma{href}"
+                        product_links.append(href)
+                        logger.debug(f"Lien trouvé (approche alternative) : {href}")
+            
+            product_links = list(set(product_links))  # Suppression des doublons
+            product_links.sort()
+            
+            logger.info(f"✅ {len(product_links)} liens trouvés avec l'approche alternative")
+            if len(product_links) > 0:
+                logger.info(f"Premier lien trouvé : {product_links[0]}")
+                logger.info(f"Dernier lien trouvé : {product_links[-1]}")
+
         return product_links
     except Exception as e:
         logger.error(f"Erreur lors de la récupération des liens : {e}")
