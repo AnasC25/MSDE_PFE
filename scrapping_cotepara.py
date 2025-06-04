@@ -3,8 +3,8 @@ import csv
 import re
 import random
 from datetime import datetime
-from playwright.async_api import async_playwright, TimeoutError, Error as PlaywrightError, Browser, Page
-from typing import List, Dict, Optional
+from playwright.async_api import async_playwright, TimeoutError, Error as PlaywrightError, Browser, Page, Request, Response
+from typing import List, Dict, Optional, Set
 import logging
 from asyncio import Semaphore
 import time
@@ -44,6 +44,15 @@ PAGE_TIMEOUT = 60000  # 60 seconds
 NAVIGATION_TIMEOUT = 90000  # 90 seconds
 CONCURRENT_PAGES = 3  # Number of concurrent pages to process
 INITIAL_LOAD_TIMEOUT = 30000  # 30 seconds for initial page load
+MAX_PRODUCTS_PER_PAGE = 100  # Maximum number of products to process per page
+
+# List of common user agents
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0'
+]
 
 def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = None) -> bool:
     """
@@ -412,12 +421,15 @@ class CoteParaScraper:
         self.browser: Optional[Browser] = None
         self.context = None
         self.pages: List[Page] = []
-        self.products = []
+        self.products: List[Dict] = []
         self.current_page = 1
         self.max_pages = 1
         self.is_running = True
         self.navigation_lock = asyncio.Lock()
         self.playwright = None
+        self.failed_requests: Set[str] = set()
+        self.processed_urls: Set[str] = set()
+        self.semaphore = asyncio.Semaphore(CONCURRENT_PAGES)
 
     async def init_browser(self):
         """Initialize the browser with proper configuration."""
@@ -431,14 +443,20 @@ class CoteParaScraper:
                     '--disable-dev-shm-usage',
                     '--disable-accelerated-2d-canvas',
                     '--disable-gpu',
-                    '--window-size=1920,1080'
+                    '--window-size=1920,1080',
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process'
                 ]
             )
+            
+            # Create a new context with random user agent
+            user_agent = random.choice(USER_AGENTS)
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                user_agent=user_agent,
                 java_script_enabled=True,
-                bypass_csp=True
+                bypass_csp=True,
+                ignore_https_errors=True
             )
             
             # Create multiple pages for concurrent processing
@@ -446,10 +464,22 @@ class CoteParaScraper:
                 page = await self.context.new_page()
                 page.set_default_timeout(PAGE_TIMEOUT)
                 page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+                
+                # Add request interception
+                await page.route("**/*", self.handle_route)
+                
                 self.pages.append(page)
+                
         except Exception as e:
             logger.error(f"Error initializing browser: {str(e)}")
             raise
+
+    async def handle_route(self, route: Request):
+        """Handle request routing to block unnecessary resources."""
+        if route.resource_type in ['image', 'stylesheet', 'font', 'media']:
+            await route.abort()
+        else:
+            await route.continue_()
 
     async def close_browser(self):
         """Close the browser and clean up resources."""
@@ -465,7 +495,7 @@ class CoteParaScraper:
         """Wait for the page to be fully loaded."""
         try:
             # Wait for the network to be idle
-            await page.wait_for_load_state('networkidle', timeout=timeout)
+            await page.wait_for_load_state('domcontentloaded', timeout=timeout)
             
             # Wait for the main content to be visible
             await page.wait_for_selector('body', timeout=timeout)
@@ -486,6 +516,10 @@ class CoteParaScraper:
 
     async def navigate_with_retry(self, page: Page, url: str, max_retries: int = MAX_RETRIES) -> bool:
         """Navigate to a URL with retry logic and navigation lock."""
+        if url in self.failed_requests:
+            logger.warning(f"Skipping previously failed URL: {url}")
+            return False
+
         async with self.navigation_lock:  # Ensure only one navigation at a time
             for attempt in range(max_retries):
                 try:
@@ -493,6 +527,9 @@ class CoteParaScraper:
                     
                     # Clear cookies and cache before navigation
                     await self.context.clear_cookies()
+                    
+                    # Add random delay before navigation
+                    await asyncio.sleep(random.uniform(1, 3))
                     
                     # Navigate to the page
                     response = await page.goto(
@@ -519,6 +556,9 @@ class CoteParaScraper:
                     delay = RETRY_DELAY * (2 ** attempt)  # Exponential backoff
                     logger.info(f"Waiting {delay} seconds before retry...")
                     await asyncio.sleep(delay)
+            
+            # If all retries failed, add URL to failed requests
+            self.failed_requests.add(url)
             return False
 
     async def get_product_links(self, page: Page, page_url: str) -> List[str]:
@@ -545,11 +585,11 @@ class CoteParaScraper:
                 product_urls = []
                 for link in links:
                     href = await link.get_attribute('href')
-                    if href:
+                    if href and href not in self.processed_urls:
                         product_urls.append(href)
                 
-                logger.info(f"Found {len(product_urls)} product links")
-                return product_urls
+                logger.info(f"Found {len(product_urls)} new product links")
+                return product_urls[:MAX_PRODUCTS_PER_PAGE]  # Limit the number of products per page
             except Exception as e:
                 logger.error(f"Error getting product links: {str(e)}")
                 if attempt < MAX_RETRIES - 1:
@@ -560,6 +600,10 @@ class CoteParaScraper:
 
     async def extract_product_data(self, page: Page, product_url: str) -> Optional[Dict]:
         """Extract product data with retry logic."""
+        if product_url in self.processed_urls:
+            logger.info(f"Skipping already processed URL: {product_url}")
+            return None
+
         for attempt in range(MAX_RETRIES):
             try:
                 logger.info(f"Extracting data from {product_url} (attempt {attempt + 1}/{MAX_RETRIES})")
@@ -588,7 +632,8 @@ class CoteParaScraper:
                         name: getText('.product-name') || getText('h1'),
                         price: getText('.product-price') || getText('.price'),
                         description: getText('.product-description') || getText('.description'),
-                        url: window.location.href
+                        url: window.location.href,
+                        timestamp: new Date().toISOString()
                     };
                     
                     // Additional data if available
@@ -603,6 +648,7 @@ class CoteParaScraper:
                 
                 if product_data and product_data.get('name'):
                     logger.info(f"Successfully extracted data for product: {product_data['name']}")
+                    self.processed_urls.add(product_url)
                     return product_data
                 else:
                     logger.warning(f"No product data found for {product_url}")
@@ -618,28 +664,29 @@ class CoteParaScraper:
 
     async def process_page(self, page_number: int):
         """Process a single page of products."""
-        page_url = f"{BASE_URL}/best-sellers/{page_number}/"
-        logger.info(f"📄 Processing page {page_number}: {page_url}")
-        
-        # Use a dedicated page for this task
-        page = self.pages[page_number % CONCURRENT_PAGES]
-        
-        product_urls = await self.get_product_links(page, page_url)
-        if not product_urls:
-            logger.warning(f"No product links found on page {page_number}")
-            return
-        
-        for product_url in product_urls:
-            if not self.is_running:
-                break
-                
-            product_data = await self.extract_product_data(page, product_url)
-            if product_data:
-                self.products.append(product_data)
-                logger.info(f"✅ Added product: {product_data['name']}")
+        async with self.semaphore:  # Limit concurrent page processing
+            page_url = f"{BASE_URL}/best-sellers/{page_number}/"
+            logger.info(f"📄 Processing page {page_number}: {page_url}")
             
-            # Add a small delay between products
-            await asyncio.sleep(random.uniform(1, 3))
+            # Use a dedicated page for this task
+            page = self.pages[page_number % CONCURRENT_PAGES]
+            
+            product_urls = await self.get_product_links(page, page_url)
+            if not product_urls:
+                logger.warning(f"No product links found on page {page_number}")
+                return
+            
+            for product_url in product_urls:
+                if not self.is_running:
+                    break
+                    
+                product_data = await self.extract_product_data(page, product_url)
+                if product_data:
+                    self.products.append(product_data)
+                    logger.info(f"✅ Added product: {product_data['name']}")
+                
+                # Add a small delay between products
+                await asyncio.sleep(random.uniform(1, 3))
 
     async def run(self):
         """Main scraping process."""
