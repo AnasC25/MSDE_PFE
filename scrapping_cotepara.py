@@ -114,11 +114,10 @@ async def wait_for_network_idle(page, timeout=10000):
 async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_products: int, current_index: int) -> Optional[Dict]:
     """
     Récupère les détails d'un produit à partir de son URL.
-    Utilise un sémaphore pour limiter le nombre de requêtes simultanées.
-    Gère les erreurs réseau et les retries.
     """
     async with semaphore:
         for attempt in range(MAX_RETRIES):
+            product_page = None
             try:
                 # Pause plus longue entre les tentatives
                 await asyncio.sleep(random.uniform(3, 7))
@@ -139,8 +138,6 @@ async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_prod
                             await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                             continue
                     raise
-                finally:
-                    await product_page.close()
 
                 # Attente de l'élément titre du produit
                 try:
@@ -214,18 +211,22 @@ async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_prod
                     await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                     continue
                 return None
+            finally:
+                if product_page:
+                    try:
+                        await product_page.close()
+                    except Exception as e:
+                        logger.warning(f"Error closing product page: {e}")
 
 async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = None) -> List[Dict]:
     """
-    Fonction principale qui parcourt toutes les pages de la boutique,
-    récupère les liens des produits et lance le scraping des détails pour chaque produit.
+    Fonction principale qui parcourt toutes les pages de la boutique.
     """
-    all_products = []  # Liste de tous les produits scrappés
-    semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)  # Limite le nombre de requêtes simultanées
-    total_products_scraped = 0  # Compteur total
+    all_products = []
+    semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
+    total_products_scraped = 0
 
     async with async_playwright() as p:
-        # Lancement du navigateur avec des options pour le scraping
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -256,6 +257,7 @@ async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = No
                 '--password-store=basic'
             ]
         )
+        
         context = await browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -263,81 +265,77 @@ async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = No
             bypass_csp=True
         )
         
-        # Définition du timeout par défaut pour toutes les actions
         context.set_default_timeout(TIMEOUT)
         
-        page = await context.new_page()
-        
-        # Interception des requêtes (ici on laisse tout passer)
-        await page.route("**/*", lambda route: route.continue_())
+        try:
+            page = await context.new_page()
+            await page.route("**/*", lambda route: route.continue_())
 
-        page_number = start_page
-        while True:
-            if max_pages and page_number > max_pages:
-                break
-
-            url = f"https://cotepara.ma/best-sellers/{page_number}/"
-            logger.info(f"📄 Processing page {page_number}: {url}")
-            
-            # Tentatives multiples pour charger la page de produits
-            for attempt in range(MAX_RETRIES):
-                try:
-                    response = await page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
-                    if not response:
-                        raise PlaywrightError("No response received")
-                    if response.status >= 400:
-                        raise PlaywrightError(f"HTTP {response.status}")
-                    await wait_for_network_idle(page)
-                    await page.wait_for_selector("a.porto-tb-link", timeout=15000)
+            page_number = start_page
+            while True:
+                if max_pages and page_number > max_pages:
                     break
-                except Exception as e:
-                    if attempt == MAX_RETRIES - 1:
-                        logger.error(f"⛔ Failed to load page {page_number} after {MAX_RETRIES} attempts: {e}")
-                        return all_products
-                    logger.warning(f"Retrying page {page_number} (attempt {attempt + 1}/{MAX_RETRIES})")
-                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
 
-            # Récupération des liens de tous les produits sur la page
-            links = await page.query_selector_all("a.porto-tb-link")
-            product_links = [await link.get_attribute("href") for link in links if await link.get_attribute("href")]
-
-            if not product_links:
-                logger.info("✅ No more products found. Finishing.")
-                break
-
-            # Scraping des produits par petits lots pour éviter de surcharger le serveur
-            for i in range(0, len(product_links), BATCH_SIZE):
-                batch_links = product_links[i:i + BATCH_SIZE]
-                tasks = [
-                    scrape_product_detail(
-                        page, 
-                        link, 
-                        semaphore, 
-                        len(product_links), 
-                        i + idx
-                    ) for idx, link in enumerate(batch_links)
-                ]
-                results = await asyncio.gather(*tasks)
+                url = f"https://cotepara.ma/best-sellers/{page_number}/"
+                logger.info(f"📄 Processing page {page_number}: {url}")
                 
-                # Ajout des produits valides à la liste globale
-                valid_products = [p for p in results if p is not None]
-                all_products.extend(valid_products)
-                total_products_scraped += len(valid_products)
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        response = await page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                        if not response:
+                            raise PlaywrightError("No response received")
+                        if response.status >= 400:
+                            raise PlaywrightError(f"HTTP {response.status}")
+                        await wait_for_network_idle(page)
+                        await page.wait_for_selector("a.porto-tb-link", timeout=15000)
+                        break
+                    except Exception as e:
+                        if attempt == MAX_RETRIES - 1:
+                            logger.error(f"⛔ Failed to load page {page_number} after {MAX_RETRIES} attempts: {e}")
+                            return all_products
+                        logger.warning(f"Retrying page {page_number} (attempt {attempt + 1}/{MAX_RETRIES})")
+                        await asyncio.sleep(RETRY_DELAY * (attempt + 1))
 
-                logger.info(f"🧺 Page {page_number}: Found {len(valid_products)} products in batch. Total: {total_products_scraped}")
-                
-                # Sauvegarde après chaque lot
-                save_to_csv(all_products, FILENAME)
-                
-                # Pause entre les lots
-                await asyncio.sleep(random.uniform(3.0, 6.0))
+                links = await page.query_selector_all("a.porto-tb-link")
+                product_links = [await link.get_attribute("href") for link in links if await link.get_attribute("href")]
 
-            page_number += 1
-            # Pause entre les pages
-            await asyncio.sleep(random.uniform(5.0, 8.0))
+                if not product_links:
+                    logger.info("✅ No more products found. Finishing.")
+                    break
 
-        await context.close()
-        await browser.close()
+                for i in range(0, len(product_links), BATCH_SIZE):
+                    batch_links = product_links[i:i + BATCH_SIZE]
+                    tasks = [
+                        scrape_product_detail(
+                            page, 
+                            link, 
+                            semaphore, 
+                            len(product_links), 
+                            i + idx
+                        ) for idx, link in enumerate(batch_links)
+                    ]
+                    results = await asyncio.gather(*tasks)
+                    
+                    valid_products = [p for p in results if p is not None]
+                    all_products.extend(valid_products)
+                    total_products_scraped += len(valid_products)
+
+                    logger.info(f"🧺 Page {page_number}: Found {len(valid_products)} products in batch. Total: {total_products_scraped}")
+                    
+                    save_to_csv(all_products, FILENAME)
+                    
+                    await asyncio.sleep(random.uniform(3.0, 6.0))
+
+                page_number += 1
+                await asyncio.sleep(random.uniform(5.0, 8.0))
+
+        finally:
+            try:
+                await context.close()
+                await browser.close()
+            except Exception as e:
+                logger.warning(f"Error closing browser: {e}")
+
         logger.info("✅ Scraping completed successfully")
         return all_products
 
