@@ -32,7 +32,7 @@ PRODUCT_LOAD_TIMEOUT = 30000  # Timeout pour le chargement des éléments produi
 
 # Configuration AWS S3
 S3_CONFIG = Config(max_pool_connections=50)
-s3_client = boto3.client("s3", config=S3_CONFIG)
+s3_client = boto3.client("s3", region_name="us-east-1", config=S3_CONFIG)
 BUCKET_NAME = "msde-pfe-blobs"  # Assurez-vous que ce bucket existe dans votre compte AWS
 
 def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = None) -> bool:
