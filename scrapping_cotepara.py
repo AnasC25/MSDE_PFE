@@ -21,9 +21,9 @@ BUCKET_NAME = 'msde-pfe-scraping'
 S3_PREFIX = 'cotepara'
 
 # Configuration des timeouts
-PAGE_TIMEOUT = 60000  # 60 secondes
-NAVIGATION_TIMEOUT = 90000  # 90 secondes
-SELECTOR_TIMEOUT = 45000  # 45 secondes
+PAGE_TIMEOUT = 120000  # 120 secondes
+NAVIGATION_TIMEOUT = 120000  # 120 secondes
+SELECTOR_TIMEOUT = 90000  # 90 secondes
 
 class CoteParaScraper:
     def __init__(self):
@@ -101,14 +101,22 @@ class CoteParaScraper:
             page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
             
             logger.info(f"🌐 Navigation vers {self.base_url}")
-            await page.goto(self.base_url, wait_until='domcontentloaded')
+            await page.goto(self.base_url, wait_until='networkidle')
             
             logger.info("⏳ Attente du chargement des produits...")
-            await page.wait_for_selector('.product-grid', timeout=SELECTOR_TIMEOUT)
+            # Attendre que la page soit complètement chargée
+            await page.wait_for_load_state('networkidle')
+            
+            # Attendre que les produits soient visibles
+            await page.wait_for_selector('.porto-tb-item.product', timeout=SELECTOR_TIMEOUT)
             
             # Get all products
-            products = await page.query_selector_all('.product-grid .product-item')
+            products = await page.query_selector_all('.porto-tb-item.product')
             logger.info(f"📦 {len(products)} produits trouvés sur la page")
+            
+            if not products:
+                logger.warning("⚠️ Aucun produit trouvé sur la page")
+                return
             
             # Process each product
             for index, product in enumerate(products):
