@@ -16,8 +16,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration AWS
-AWS_REGION = 'eu-west-3'
-BUCKET_NAME = 'msde-pfe-scraping'
+AWS_REGION = 'us-east-1'
+BUCKET_NAME = 'msde-pfe-blobs'
 S3_PREFIX = 'cotepara'
 
 # Configuration des timeouts
