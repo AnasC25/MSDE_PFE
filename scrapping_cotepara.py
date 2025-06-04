@@ -22,13 +22,13 @@ logger = logging.getLogger(__name__)
 
 # Constantes de configuration du script
 FILENAME = "produits_Scrapper.csv"  # Nom du fichier CSV de sortie
-MAX_CONCURRENT_REQUESTS = 10  # Augmenté pour accélérer le scraping
+MAX_CONCURRENT_REQUESTS = 5  # Augmenté pour accélérer le scraping
 MAX_RETRIES = 3  # Limité pour éviter les attentes longues
 TIMEOUT = 30000  # Timeout général réduit à 30 secondes
-PAGE_LOAD_TIMEOUT = 15000  # Timeout page à 15 secondes
+PAGE_LOAD_TIMEOUT = 30000  # 30 secondes
 RETRY_DELAY = 5  # Retry delay réduit à 5 secondes
-BATCH_SIZE = 10  # Plus de produits traités en parallèle
-PRODUCT_LOAD_TIMEOUT = 10000  # Timeout pour les éléments produit à 10 secondes
+BATCH_SIZE = 5  # Plus de produits traités en parallèle
+PRODUCT_LOAD_TIMEOUT = 20000  # 20 secondes
 
 # Configuration AWS S3
 S3_CONFIG = Config(max_pool_connections=50)
@@ -271,6 +271,8 @@ async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_prod
                     except Exception as e:
                         logger.warning(f"Error closing product page: {e}")
 
+            logger.info(f"Traitement du batch {i//BATCH_SIZE+1}")
+
 async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = None) -> List[Dict]:
     """
     Fonction principale qui parcourt toutes les pages de la boutique.
@@ -349,7 +351,9 @@ async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = No
                         logger.warning(f"Retrying page {page_number} (attempt {attempt + 1}/{MAX_RETRIES})")
                         await asyncio.sleep(RETRY_DELAY * (attempt + 1))
 
+                logger.info("Avant query_selector_all")
                 links = await page.query_selector_all("a.porto-tb-link")
+                logger.info(f"Nb liens trouvés : {len(links)}")
                 product_links = [await link.get_attribute("href") for link in links if await link.get_attribute("href")]
 
                 if not product_links:
