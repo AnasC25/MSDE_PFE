@@ -40,9 +40,10 @@ S3_PREFIX = 'cotepara'
 
 # Configuration du scraping
 BASE_URL = "https://cotepara.ma"
-PAGE_TIMEOUT = 30000  # 30 seconds
-NAVIGATION_TIMEOUT = 60000  # 60 seconds
+PAGE_TIMEOUT = 60000  # 60 seconds
+NAVIGATION_TIMEOUT = 90000  # 90 seconds
 CONCURRENT_PAGES = 3  # Number of concurrent pages to process
+INITIAL_LOAD_TIMEOUT = 30000  # 30 seconds for initial page load
 
 def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = None) -> bool:
     """
@@ -424,11 +425,20 @@ class CoteParaScraper:
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
                 headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox']
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu',
+                    '--window-size=1920,1080'
+                ]
             )
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                java_script_enabled=True,
+                bypass_csp=True
             )
             
             # Create multiple pages for concurrent processing
@@ -451,26 +461,64 @@ class CoteParaScraper:
         except Exception as e:
             logger.error(f"Error closing browser: {str(e)}")
 
+    async def wait_for_page_load(self, page: Page, timeout: int = INITIAL_LOAD_TIMEOUT) -> bool:
+        """Wait for the page to be fully loaded."""
+        try:
+            # Wait for the network to be idle
+            await page.wait_for_load_state('networkidle', timeout=timeout)
+            
+            # Wait for the main content to be visible
+            await page.wait_for_selector('body', timeout=timeout)
+            
+            # Additional check for dynamic content
+            await page.wait_for_function('''
+                () => {
+                    return document.readyState === 'complete' &&
+                           document.body !== null &&
+                           document.body.innerHTML.length > 0;
+                }
+            ''', timeout=timeout)
+            
+            return True
+        except Exception as e:
+            logger.warning(f"Error waiting for page load: {str(e)}")
+            return False
+
     async def navigate_with_retry(self, page: Page, url: str, max_retries: int = MAX_RETRIES) -> bool:
         """Navigate to a URL with retry logic and navigation lock."""
         async with self.navigation_lock:  # Ensure only one navigation at a time
             for attempt in range(max_retries):
                 try:
                     logger.info(f"Navigating to {url} (attempt {attempt + 1}/{max_retries})")
-                    response = await page.goto(url, wait_until='domcontentloaded')
+                    
+                    # Clear cookies and cache before navigation
+                    await self.context.clear_cookies()
+                    
+                    # Navigate to the page
+                    response = await page.goto(
+                        url,
+                        wait_until='domcontentloaded',
+                        timeout=NAVIGATION_TIMEOUT
+                    )
+                    
                     if response and response.ok:
                         # Wait for the page to be fully loaded
-                        await page.wait_for_load_state('networkidle', timeout=PAGE_TIMEOUT)
-                        return True
+                        if await self.wait_for_page_load(page):
+                            return True
+                        else:
+                            logger.warning("Page load check failed")
                     else:
                         logger.warning(f"Navigation failed with status: {response.status if response else 'No response'}")
+                        
                 except TimeoutError:
                     logger.warning(f"Timeout while navigating to {url} (attempt {attempt + 1}/{max_retries})")
                 except Exception as e:
                     logger.error(f"Error navigating to {url}: {str(e)}")
                 
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))  # Exponential backoff
+                    delay = RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+                    logger.info(f"Waiting {delay} seconds before retry...")
+                    await asyncio.sleep(delay)
             return False
 
     async def get_product_links(self, page: Page, page_url: str) -> List[str]:
@@ -481,8 +529,16 @@ class CoteParaScraper:
                 if not await self.navigate_with_retry(page, page_url):
                     continue
                 
-                # Wait for product grid to be visible
+                # Wait for product grid to be visible with increased timeout
                 await page.wait_for_selector('.product-grid', timeout=PAGE_TIMEOUT)
+                
+                # Additional wait for dynamic content
+                await page.wait_for_function('''
+                    () => {
+                        const grid = document.querySelector('.product-grid');
+                        return grid && grid.children.length > 0;
+                    }
+                ''', timeout=PAGE_TIMEOUT)
                 
                 # Get all product links
                 links = await page.query_selector_all('.product-grid .product-item a')
@@ -497,7 +553,9 @@ class CoteParaScraper:
             except Exception as e:
                 logger.error(f"Error getting product links: {str(e)}")
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                    delay = RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+                    logger.info(f"Waiting {delay} seconds before retry...")
+                    await asyncio.sleep(delay)
         return []
 
     async def extract_product_data(self, page: Page, product_url: str) -> Optional[Dict]:
@@ -510,6 +568,14 @@ class CoteParaScraper:
                 
                 # Wait for product details to be visible
                 await page.wait_for_selector('.product-details', timeout=PAGE_TIMEOUT)
+                
+                # Additional wait for dynamic content
+                await page.wait_for_function('''
+                    () => {
+                        const details = document.querySelector('.product-details');
+                        return details && details.innerHTML.length > 0;
+                    }
+                ''', timeout=PAGE_TIMEOUT)
                 
                 # Extract product data with more robust selectors
                 product_data = await page.evaluate('''() => {
@@ -545,7 +611,9 @@ class CoteParaScraper:
             except Exception as e:
                 logger.error(f"Error extracting product data: {str(e)}")
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                    delay = RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+                    logger.info(f"Waiting {delay} seconds before retry...")
+                    await asyncio.sleep(delay)
         return None
 
     async def process_page(self, page_number: int):
