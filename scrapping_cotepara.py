@@ -3,7 +3,7 @@ import csv
 import re
 import random
 from datetime import datetime
-from playwright.async_api import async_playwright, TimeoutError, Error as PlaywrightError, Browser, Page, Request, Response
+from playwright.async_api import async_playwright, TimeoutError, Error as PlaywrightError, Browser, Page, Request, Response, Route
 from typing import List, Dict, Optional, Set
 import logging
 from asyncio import Semaphore
@@ -52,6 +52,15 @@ USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0'
+]
+
+# Resources to block
+BLOCKED_RESOURCES = [
+    'image',
+    'stylesheet',
+    'font',
+    'media',
+    'other'
 ]
 
 def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = None) -> bool:
@@ -474,11 +483,18 @@ class CoteParaScraper:
             logger.error(f"Error initializing browser: {str(e)}")
             raise
 
-    async def handle_route(self, route: Request):
+    async def handle_route(self, route: Route):
         """Handle request routing to block unnecessary resources."""
-        if route.resource_type in ['image', 'stylesheet', 'font', 'media']:
-            await route.abort()
-        else:
+        try:
+            request = route.request
+            resource_type = request.resource_type
+            
+            if resource_type in BLOCKED_RESOURCES:
+                await route.abort()
+            else:
+                await route.continue_()
+        except Exception as e:
+            logger.error(f"Error handling route: {str(e)}")
             await route.continue_()
 
     async def close_browser(self):
