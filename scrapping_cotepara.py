@@ -68,6 +68,20 @@ class CoteParaScraper:
         try:
             logger.info(f"📤 Début de l'upload vers S3: {file_path}")
             
+            # Check if bucket exists
+            try:
+                self.s3_client.head_bucket(Bucket=BUCKET_NAME)
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                if error_code == '404':
+                    logger.error(f"❌ Le bucket S3 '{BUCKET_NAME}' n'existe pas. Veuillez créer le bucket ou vérifier le nom.")
+                    return False
+                elif error_code == '403':
+                    logger.error(f"❌ Accès refusé au bucket S3 '{BUCKET_NAME}'. Vérifiez vos permissions AWS.")
+                    return False
+                else:
+                    raise
+            
             # Get the filename from the path
             filename = file_path.split('/')[-1]
             
