@@ -118,14 +118,16 @@ class CoteParaScraper:
                     # Extract product data with retry
                     for attempt in range(3):
                         try:
-                            title = await product.query_selector('.product-name')
-                            price = await product.query_selector('.product-price')
-                            old_price = await product.query_selector('.old-price')
+                            title = await product.query_selector('.porto-heading a')
+                            price = await product.query_selector('.tb-woo-price ins .woocommerce-Price-amount')
+                            old_price = await product.query_selector('.tb-woo-price del .woocommerce-Price-amount')
+                            discount = await product.query_selector('.labels .onsale')
                             
                             # Get text content
                             title_text = await title.text_content() if title else "N/A"
                             price_text = await price.text_content() if price else "N/A"
                             old_price_text = await old_price.text_content() if old_price else "N/A"
+                            discount_text = await discount.text_content() if discount else "N/A"
                             
                             # Calculate score (highest for first product, lowest for last)
                             score = len(products) - index
@@ -135,6 +137,7 @@ class CoteParaScraper:
                                 "title": title_text.strip(),
                                 "price": price_text.strip(),
                                 "old_price": old_price_text.strip(),
+                                "discount": discount_text.strip(),
                                 "score": score
                             })
                             
@@ -142,6 +145,8 @@ class CoteParaScraper:
                             logger.info(f"💰 Prix: {price_text.strip()}")
                             if old_price_text.strip() != "N/A":
                                 logger.info(f"💲 Prix barré: {old_price_text.strip()}")
+                            if discount_text.strip() != "N/A":
+                                logger.info(f"🎯 Réduction: {discount_text.strip()}")
                             logger.info(f"⭐ Score: {score}")
                             logger.info("➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖")
                             break
