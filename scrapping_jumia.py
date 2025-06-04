@@ -33,28 +33,67 @@ BUCKET_NAME = "msde-pfe-blobs"
 def open_browser():
     try:
         chrome_options = Options()
+        # Basic options
         chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_argument('--disable-extensions')
+        
+        # Memory and performance options
         chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-software-rasterizer')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-dev-tools')
+        chrome_options.add_argument('--disable-logging')
+        chrome_options.add_argument('--disable-notifications')
+        chrome_options.add_argument('--disable-popup-blocking')
+        chrome_options.add_argument('--disable-infobars')
+        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        
+        # Memory management
+        chrome_options.add_argument('--disable-application-cache')
+        chrome_options.add_argument('--disable-background-networking')
+        chrome_options.add_argument('--disable-background-timer-throttling')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-breakpad')
+        chrome_options.add_argument('--disable-component-extensions-with-background-pages')
+        chrome_options.add_argument('--disable-features=TranslateUI,BlinkGenPropertyTrees')
+        chrome_options.add_argument('--disable-ipc-flooding-protection')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
+        
+        # Window and display
         chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--start-maximized')
+        
+        # Security and certificates
         chrome_options.add_argument('--ignore-certificate-errors')
         chrome_options.add_argument('--allow-running-insecure-content')
         chrome_options.add_argument('--disable-web-security')
-        chrome_options.add_argument('--user-agent=Mozilla/5.0')
+        
+        # User agent and automation
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         chrome_options.add_argument(f'--user-data-dir={tempfile.mkdtemp()}')
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        
+        # Additional experimental options
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
-
+        
+        # Set page load strategy
+        chrome_options.page_load_strategy = 'eager'
+        
         service = Service("/usr/local/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Set timeouts
+        driver.set_page_load_timeout(30)
+        driver.set_script_timeout(30)
+        
+        # Mask webdriver
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         return driver
     except Exception as e:
         logger.error(f"Erreur navigateur : {e}")
+        logger.error(traceback.format_exc())
         raise
 
 def get_product_links(browser, category_url):
@@ -63,6 +102,7 @@ def get_product_links(browser, category_url):
         all_product_links = set()
         current_page = 1
         max_pages = 50
+        max_retries = 3
 
         while current_page <= max_pages:
             if psutil.virtual_memory().percent > 85:
@@ -71,47 +111,68 @@ def get_product_links(browser, category_url):
 
             page_url = f"{category_url}?page={current_page}" if current_page > 1 else category_url
             logger.info(f"Page {current_page} : {page_url}")
-            try:
-                browser.get(page_url)
-                time.sleep(5)
-            except Exception as e:
-                logger.error(f"Crash du navigateur à {page_url} : {e}")
+            
+            retry_count = 0
+            while retry_count < max_retries:
+                try:
+                    browser.get(page_url)
+                    time.sleep(5)
+                    
+                    # Wait for page load with increased timeout
+                    WebDriverWait(browser, 20).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "a.core[href*='.html']"))
+                    )
+                    break
+                except Exception as e:
+                    retry_count += 1
+                    logger.warning(f"Tentative {retry_count}/{max_retries} échouée : {str(e)}")
+                    if retry_count == max_retries:
+                        logger.error(f"Échec après {max_retries} tentatives pour {page_url}")
+                        current_page += 1
+                        break
+                    
+                    # Restart browser on failure
+                    try:
+                        browser.quit()
+                    except:
+                        pass
+                    browser = open_browser()
+                    time.sleep(5)
+                    continue
+
+            if retry_count == max_retries:
                 continue
 
             try:
-                WebDriverWait(browser, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "a.core[href*='.html']"))
-                )
-            except TimeoutException:
-                logger.warning("⏳ Timeout, passage à la page suivante")
+                soup = BeautifulSoup(browser.page_source, "lxml")
+                links = set()
+                for sel in ["article.prd._fb._spn.c-prd.col a.core", "article.prd a.core", "a.core[href*='.html']"]:
+                    elements = soup.select(sel)
+                    logger.info(f"{len(elements)} éléments avec {sel}")
+                    for el in elements:
+                        href = el.get("href")
+                        if href and not href.startswith("http"):
+                            href = "https://www.jumia.ma" + href
+                        links.add(href)
+
+                if not links:
+                    logger.info("Fin de la pagination.")
+                    break
+
+                all_product_links.update(links)
+                logger.info(f"Total cumulé : {len(all_product_links)} liens")
+
+                if current_page % 5 == 0:  # Restart browser more frequently
+                    logger.info("♻️ Redémarrage du navigateur pour vider mémoire...")
+                    browser.quit()
+                    browser = open_browser()
+
+                current_page += 1
+                time.sleep(2)
+            except Exception as e:
+                logger.error(f"Erreur lors du parsing de la page {current_page}: {e}")
                 current_page += 1
                 continue
-
-            soup = BeautifulSoup(browser.page_source, "lxml")
-            links = set()
-            for sel in ["article.prd._fb._spn.c-prd.col a.core", "article.prd a.core", "a.core[href*='.html']"]:
-                elements = soup.select(sel)
-                logger.info(f"{len(elements)} éléments avec {sel}")
-                for el in elements:
-                    href = el.get("href")
-                    if href and not href.startswith("http"):
-                        href = "https://www.jumia.ma" + href
-                    links.add(href)
-
-            if not links:
-                logger.info("Fin de la pagination.")
-                break
-
-            all_product_links.update(links)
-            logger.info(f"Total cumulé : {len(all_product_links)} liens")
-
-            if current_page % 10 == 0:
-                logger.info("♻️ Redémarrage du navigateur pour vider mémoire...")
-                browser.quit()
-                browser = open_browser()
-
-            current_page += 1
-            time.sleep(2)
 
         return list(sorted(all_product_links))
     except Exception as e:
