@@ -38,6 +38,12 @@ s3_client = boto3.client("s3", region_name="us-east-1", config=S3_CONFIG)
 BUCKET_NAME = "msde-pfe-blobs"  # Assurez-vous que ce bucket existe dans votre compte AWS
 S3_PREFIX = 'cotepara'
 
+# Configuration du scraping
+BASE_URL = "https://cotepara.ma"
+PAGE_TIMEOUT = 30000  # 30 seconds
+NAVIGATION_TIMEOUT = 60000  # 60 seconds
+CONCURRENT_PAGES = 3  # Number of concurrent pages to process
+
 def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = None) -> bool:
     """
     Upload un fichier vers un bucket S3.
@@ -410,30 +416,40 @@ class CoteParaScraper:
         self.max_pages = 1
         self.is_running = True
         self.navigation_lock = asyncio.Lock()
+        self.playwright = None
 
     async def init_browser(self):
         """Initialize the browser with proper configuration."""
-        playwright = await async_playwright().start()
-        self.browser = await playwright.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox']
-        )
-        self.context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        )
-        
-        # Create multiple pages for concurrent processing
-        for _ in range(CONCURRENT_PAGES):
-            page = await self.context.new_page()
-            page.set_default_timeout(PAGE_TIMEOUT)
-            page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
-            self.pages.append(page)
+        try:
+            self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            )
+            
+            # Create multiple pages for concurrent processing
+            for _ in range(CONCURRENT_PAGES):
+                page = await self.context.new_page()
+                page.set_default_timeout(PAGE_TIMEOUT)
+                page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+                self.pages.append(page)
+        except Exception as e:
+            logger.error(f"Error initializing browser: {str(e)}")
+            raise
 
     async def close_browser(self):
         """Close the browser and clean up resources."""
-        if self.browser:
-            await self.browser.close()
+        try:
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+        except Exception as e:
+            logger.error(f"Error closing browser: {str(e)}")
 
     async def navigate_with_retry(self, page: Page, url: str, max_retries: int = MAX_RETRIES) -> bool:
         """Navigate to a URL with retry logic and navigation lock."""
@@ -534,7 +550,7 @@ class CoteParaScraper:
 
     async def process_page(self, page_number: int):
         """Process a single page of products."""
-        page_url = f"https://cotepara.ma/best-sellers/{page_number}/"
+        page_url = f"{BASE_URL}/best-sellers/{page_number}/"
         logger.info(f"📄 Processing page {page_number}: {page_url}")
         
         # Use a dedicated page for this task
@@ -606,7 +622,29 @@ class CoteParaScraper:
 
 async def main():
     scraper = CoteParaScraper()
-    await scraper.run()
+    try:
+        await scraper.run()
+    except Exception as e:
+        logger.error(f"Fatal error in main: {str(e)}")
+    finally:
+        # Ensure we clean up properly
+        if scraper.browser:
+            await scraper.close_browser()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Script interrupted by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {str(e)}")
+    finally:
+        # Ensure the event loop is properly closed
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.stop()
+            if not loop.is_closed():
+                loop.close()
+        except Exception as e:
+            logger.error(f"Error closing event loop: {str(e)}")
