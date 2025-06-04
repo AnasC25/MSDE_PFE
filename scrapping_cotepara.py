@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Dict
-from playwright.async_api import async_playwright, Browser, Page
+from playwright.async_api import async_playwright, Browser, Page, TimeoutError
 import boto3
 from botocore.exceptions import ClientError
 
@@ -20,26 +20,54 @@ AWS_REGION = 'eu-west-3'
 BUCKET_NAME = 'msde-pfe-scraping'
 S3_PREFIX = 'cotepara'
 
+# Configuration des timeouts
+PAGE_TIMEOUT = 60000  # 60 secondes
+NAVIGATION_TIMEOUT = 90000  # 90 secondes
+SELECTOR_TIMEOUT = 45000  # 45 secondes
+
 class CoteParaScraper:
     def __init__(self):
         self.browser: Browser = None
         self.products: List[Dict] = []
         self.base_url = "https://cotepara.ma/best-sellers/1/"
         self.s3_client = boto3.client('s3', region_name=AWS_REGION)
+        logger.info("🚀 Initialisation du scraper CotePara")
 
     async def init_browser(self):
         """Initialize the browser."""
-        playwright = await async_playwright().start()
-        self.browser = await playwright.chromium.launch(headless=True)
+        try:
+            logger.info("🌐 Démarrage du navigateur...")
+            playwright = await async_playwright().start()
+            self.browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu'
+                ]
+            )
+            logger.info("✅ Navigateur démarré avec succès")
+        except Exception as e:
+            logger.error(f"❌ Erreur lors du démarrage du navigateur: {str(e)}")
+            raise
 
     async def close_browser(self):
         """Close the browser."""
         if self.browser:
-            await self.browser.close()
+            try:
+                logger.info("🔒 Fermeture du navigateur...")
+                await self.browser.close()
+                logger.info("✅ Navigateur fermé avec succès")
+            except Exception as e:
+                logger.error(f"❌ Erreur lors de la fermeture du navigateur: {str(e)}")
 
     def upload_to_s3(self, file_path: str) -> bool:
         """Upload a file to S3 bucket."""
         try:
+            logger.info(f"📤 Début de l'upload vers S3: {file_path}")
+            
             # Get the filename from the path
             filename = file_path.split('/')[-1]
             
@@ -53,87 +81,141 @@ class CoteParaScraper:
                 s3_key
             )
             
-            logger.info(f"✅ Successfully uploaded to S3: s3://{BUCKET_NAME}/{s3_key}")
+            logger.info(f"✅ Upload S3 réussi: s3://{BUCKET_NAME}/{s3_key}")
             return True
             
         except ClientError as e:
-            logger.error(f"❌ Error uploading to S3: {str(e)}")
+            logger.error(f"❌ Erreur lors de l'upload S3: {str(e)}")
             return False
         except Exception as e:
-            logger.error(f"❌ Unexpected error during S3 upload: {str(e)}")
+            logger.error(f"❌ Erreur inattendue lors de l'upload S3: {str(e)}")
             return False
 
     async def scrape_products(self):
         """Scrape products from the page."""
+        page = None
         try:
+            logger.info("🔄 Démarrage du scraping des produits...")
             page = await self.browser.new_page()
+            page.set_default_timeout(PAGE_TIMEOUT)
+            page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+            
+            logger.info(f"🌐 Navigation vers {self.base_url}")
             await page.goto(self.base_url, wait_until='domcontentloaded')
             
-            # Wait for products to load
-            await page.wait_for_selector('.product-grid')
+            logger.info("⏳ Attente du chargement des produits...")
+            await page.wait_for_selector('.product-grid', timeout=SELECTOR_TIMEOUT)
             
             # Get all products
             products = await page.query_selector_all('.product-grid .product-item')
+            logger.info(f"📦 {len(products)} produits trouvés sur la page")
             
             # Process each product
             for index, product in enumerate(products):
                 try:
-                    # Extract product data
-                    title = await product.query_selector('.product-name')
-                    price = await product.query_selector('.product-price')
-                    old_price = await product.query_selector('.old-price')
+                    logger.info(f"🔄 Traitement du produit {index + 1}/{len(products)}")
                     
-                    # Get text content
-                    title_text = await title.text_content() if title else "N/A"
-                    price_text = await price.text_content() if price else "N/A"
-                    old_price_text = await old_price.text_content() if old_price else "N/A"
-                    
-                    # Calculate score (highest for first product, lowest for last)
-                    score = len(products) - index
-                    
-                    # Add to products list
-                    self.products.append({
-                        "title": title_text.strip(),
-                        "price": price_text.strip(),
-                        "old_price": old_price_text.strip(),
-                        "score": score
-                    })
-                    
-                    logger.info(f"Scraped product: {title_text.strip()}")
+                    # Extract product data with retry
+                    for attempt in range(3):
+                        try:
+                            title = await product.query_selector('.product-name')
+                            price = await product.query_selector('.product-price')
+                            old_price = await product.query_selector('.old-price')
+                            
+                            # Get text content
+                            title_text = await title.text_content() if title else "N/A"
+                            price_text = await price.text_content() if price else "N/A"
+                            old_price_text = await old_price.text_content() if old_price else "N/A"
+                            
+                            # Calculate score (highest for first product, lowest for last)
+                            score = len(products) - index
+                            
+                            # Add to products list
+                            self.products.append({
+                                "title": title_text.strip(),
+                                "price": price_text.strip(),
+                                "old_price": old_price_text.strip(),
+                                "score": score
+                            })
+                            
+                            logger.info(f"✅ Produit scrapé: {title_text.strip()}")
+                            logger.info(f"💰 Prix: {price_text.strip()}")
+                            if old_price_text.strip() != "N/A":
+                                logger.info(f"💲 Prix barré: {old_price_text.strip()}")
+                            logger.info(f"⭐ Score: {score}")
+                            logger.info("➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖")
+                            break
+                            
+                        except TimeoutError:
+                            if attempt < 2:
+                                logger.warning(f"⚠️ Timeout lors de l'extraction du produit {index + 1}, nouvelle tentative...")
+                                await asyncio.sleep(2)
+                                continue
+                            else:
+                                raise
                     
                 except Exception as e:
-                    logger.error(f"Error scraping product: {str(e)}")
+                    logger.error(f"❌ Erreur lors du scraping du produit {index + 1}: {str(e)}")
                     continue
+            
+            if not self.products:
+                logger.warning("⚠️ Aucun produit n'a été scrapé")
+                return
             
             # Save to JSON file
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f"cotepara_products_{timestamp}.json"
             
+            logger.info(f"💾 Sauvegarde des données dans {filename}")
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(self.products, f, ensure_ascii=False, indent=2)
             
-            logger.info(f"✅ Successfully saved {len(self.products)} products to {filename}")
+            logger.info(f"✅ {len(self.products)} produits sauvegardés avec succès")
             
             # Upload to S3
+            logger.info("📤 Début de l'upload vers S3...")
             if self.upload_to_s3(filename):
-                logger.info("✅ S3 upload completed successfully")
+                logger.info("✅ Upload S3 terminé avec succès")
             else:
-                logger.error("❌ S3 upload failed")
+                logger.error("❌ Échec de l'upload S3")
             
+        except TimeoutError as e:
+            logger.error(f"❌ Timeout pendant le scraping: {str(e)}")
         except Exception as e:
-            logger.error(f"Error during scraping: {str(e)}")
+            logger.error(f"❌ Erreur pendant le scraping: {str(e)}")
         finally:
-            await page.close()
+            if page:
+                try:
+                    await page.close()
+                except Exception as e:
+                    logger.error(f"❌ Erreur lors de la fermeture de la page: {str(e)}")
 
 async def main():
+    logger.info("🚀 Démarrage du script de scraping CotePara")
     scraper = CoteParaScraper()
     try:
         await scraper.init_browser()
         await scraper.scrape_products()
     except Exception as e:
-        logger.error(f"Fatal error: {str(e)}")
+        logger.error(f"❌ Erreur fatale: {str(e)}")
     finally:
         await scraper.close_browser()
+        logger.info("🏁 Fin du script de scraping")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("⚠️ Script interrompu par l'utilisateur")
+    except Exception as e:
+        logger.error(f"❌ Erreur fatale: {str(e)}")
+    finally:
+        # Nettoyage de l'event loop
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.stop()
+            if not loop.is_closed():
+                loop.close()
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de la fermeture de l'event loop: {str(e)}")
