@@ -21,18 +21,18 @@ logger = logging.getLogger(__name__)
 
 # Constantes de configuration du script
 FILENAME = "produits_Scrapper.csv"  # Nom du fichier CSV de sortie
-MAX_CONCURRENT_REQUESTS = 30  # Nombre maximum de requêtes simultanées
+MAX_CONCURRENT_REQUESTS = 5  # Réduit de 30 à 5 pour éviter la surcharge
 MAX_RETRIES = 8  # Nombre de tentatives en cas d'échec réseau
 TIMEOUT = 90000  # Timeout général en millisecondes
 PAGE_LOAD_TIMEOUT = 60000  # Timeout pour le chargement d'une page
-RETRY_DELAY = 10  # Délai de base entre les tentatives (secondes)
-BATCH_SIZE = 10 # Nombre de produits traités en parallèle
+RETRY_DELAY = 15  # Augmenté de 10 à 15 secondes
+BATCH_SIZE = 5  # Réduit de 10 à 5 pour réduire la charge
 
 # Configuration AWS S3
-AWS_ACCESS_KEY = "VOTRE_ACCESS_KEY"  # À remplacer par votre clé d'accès
-AWS_SECRET_KEY = "VOTRE_SECRET_KEY"  # À remplacer par votre clé secrète
-AWS_REGION = "eu-west-3"  # Région AWS (Paris par défaut)
-S3_BUCKET_NAME = "VOTRE_BUCKET_NAME"  # À remplacer par le nom de votre bucket
+AWS_ACCESS_KEY = os.getenv('AWS_ACCESS_KEY_ID')  # Utilisation des variables d'environnement
+AWS_SECRET_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_REGION = os.getenv('AWS_REGION', 'eu-west-3')
+S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 
 def upload_to_s3(file_path: str, bucket: str, object_name: str = None) -> bool:
     """
@@ -46,6 +46,10 @@ def upload_to_s3(file_path: str, bucket: str, object_name: str = None) -> bool:
     Returns:
         bool: True si l'upload a réussi, False sinon
     """
+    if not all([AWS_ACCESS_KEY, AWS_SECRET_KEY, bucket]):
+        logger.warning("⚠️ Configuration AWS manquante, skip upload S3")
+        return False
+
     if object_name is None:
         object_name = os.path.basename(file_path)
 
@@ -63,6 +67,9 @@ def upload_to_s3(file_path: str, bucket: str, object_name: str = None) -> bool:
         return True
     except ClientError as e:
         logger.error(f"❌ Erreur lors de l'upload vers S3: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Erreur inattendue lors de l'upload S3: {e}")
         return False
 
 def clean_price(price_text: str) -> float:
@@ -124,29 +131,31 @@ async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_prod
     async with semaphore:
         for attempt in range(MAX_RETRIES):
             try:
-                # Petite pause aléatoire pour ne pas surcharger le serveur
-                await asyncio.sleep(random.uniform(2, 5))
+                # Pause plus longue entre les tentatives
+                await asyncio.sleep(random.uniform(3, 7))
                 
-                # Navigation vers la page produit avec gestion des erreurs réseau
+                # Création d'une nouvelle page pour chaque requête
+                product_page = await page.context.new_page()
                 try:
-                    response = await page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                    response = await product_page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
                     if not response:
                         raise PlaywrightError("No response received")
                     if response.status >= 400:
                         raise PlaywrightError(f"HTTP {response.status}")
-                    await wait_for_network_idle(page)
+                    await wait_for_network_idle(product_page)
                 except PlaywrightError as e:
-                    # Gestion des erreurs réseau courantes
                     if any(err in str(e) for err in ["net::ERR_ABORTED", "net::ERR_CONNECTION_RESET", "net::ERR_CONNECTION_TIMED_OUT"]):
                         logger.warning(f"Network error on attempt {attempt + 1}/{MAX_RETRIES} for {url}")
                         if attempt < MAX_RETRIES - 1:
                             await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                             continue
                     raise
+                finally:
+                    await product_page.close()
 
                 # Attente de l'élément titre du produit
                 try:
-                    await page.wait_for_selector(".product_title", timeout=15000)
+                    await product_page.wait_for_selector(".product_title", timeout=15000)
                 except TimeoutError:
                     logger.warning(f"Timeout waiting for product title on {url}")
                     if attempt < MAX_RETRIES - 1:
@@ -156,11 +165,11 @@ async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_prod
                 # Récupération des différents éléments de la page produit
                 try:
                     title_elem, description_elem, normal_price_elem, promo_price_elem, image_elem = await asyncio.gather(
-                        page.query_selector(".product_title"),
-                        page.query_selector(".woocommerce-Tabs-panel--description"),
-                        page.query_selector(".price del .woocommerce-Price-amount"),
-                        page.query_selector(".price ins .woocommerce-Price-amount"),
-                        page.query_selector(".woocommerce-product-gallery__image img"),
+                        product_page.query_selector(".product_title"),
+                        product_page.query_selector(".woocommerce-Tabs-panel--description"),
+                        product_page.query_selector(".price del .woocommerce-Price-amount"),
+                        product_page.query_selector(".price ins .woocommerce-Price-amount"),
+                        product_page.query_selector(".woocommerce-product-gallery__image img"),
                         return_exceptions=True
                     )
                 except Exception as e:
@@ -178,7 +187,7 @@ async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_prod
                     normal_price_text = await normal_price_elem.inner_text()
                     promo_price_text = await promo_price_elem.inner_text()
                 else:
-                    price_elem = await page.query_selector(".price .woocommerce-Price-amount")
+                    price_elem = await product_page.query_selector(".price .woocommerce-Price-amount")
                     price_text = await price_elem.inner_text() if price_elem else ""
                     normal_price_text = price_text
                     promo_price_text = ""
@@ -348,9 +357,14 @@ async def main():
     Point d'entrée du script : lance le scraping à partir de la première page.
     """
     try:
+        # Vérification de la configuration AWS
+        if not all([AWS_ACCESS_KEY, AWS_SECRET_KEY, S3_BUCKET_NAME]):
+            logger.warning("⚠️ Configuration AWS incomplète, l'upload S3 sera désactivé")
+        
         await scrape_all_products(start_page=1)
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
+        raise
 
 if __name__ == "__main__":
     # Exécute le script principal si ce fichier est lancé directement

@@ -1,6 +1,23 @@
-# Projet de Web Scraping E-commerce
+# Projet de Web Scraping E-commerce pour Marjanemall
 
-Ce projet est un outil de web scraping avancé pour extraire des informations de produits depuis les sites Jumia et CotePara. Il permet de collecter les détails des produits et leurs liens, avec une intégration AWS S3 pour le stockage des données.
+## Contexte du Projet
+
+Ce projet s'inscrit dans le cadre de la transformation digitale du Groupe Marjane et de sa plateforme e-commerce Marjanemall. L'objectif est d'optimiser la sélection des produits à promouvoir sur la marketplace en exploitant des données internes et externes.
+
+### À propos de Marjanemall
+
+Marjanemall est la marketplace du Groupe Marjane, lancée dans le cadre de sa stratégie de transformation digitale. La plateforme :
+- Permet aux vendeurs tiers de commercialiser leurs produits
+- S'appuie sur les capacités logistiques du Groupe Marjane
+- Propose une expérience client optimisée et cohérente
+- Utilise deux modèles logistiques : FFM (Fulfillment by Marjane) et Cross-Docking
+
+### Objectifs du Projet
+
+1. Automatiser la collecte et l'exploitation des données pertinentes
+2. Mettre en place des indicateurs de performance pour le pilotage des mises en avant
+3. Concevoir un modèle intelligent d'aide à la décision basé sur des algorithmes de scoring
+4. Offrir une visualisation claire et interactive via une application
 
 ## Fonctionnalités
 
@@ -50,6 +67,21 @@ Le projet est composé de deux scripts principaux :
    - Traitement par lots
    - Gestion avancée des erreurs
    - Upload vers AWS S3
+
+## Méthodologie de Développement
+
+Le projet suit une approche Agile avec :
+- Sprints hebdomadaires
+- Réunions régulières avec les parties prenantes
+- Suivi via Trello/Jira
+- Revues de sprint pour validation des livrables
+
+### Planification
+- Phase de cadrage : 1 semaine
+- Conception technique : 1 semaine
+- Développement : 3 semaines
+- Tests & validation : 1 semaine
+- Documentation & livraison : 1 semaine
 
 ## Prérequis
 
