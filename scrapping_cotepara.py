@@ -3,7 +3,7 @@ import csv
 import re
 import random
 from datetime import datetime
-from playwright.async_api import async_playwright, TimeoutError, Error as PlaywrightError
+from playwright.async_api import async_playwright, TimeoutError, Error as PlaywrightError, Browser, Page
 from typing import List, Dict, Optional
 import logging
 from asyncio import Semaphore
@@ -12,11 +12,13 @@ import boto3
 import os
 from botocore.exceptions import ClientError
 from botocore.config import Config
+import json
 
 # Configuration du système de logs pour afficher des messages d'information et d'erreur
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ PRODUCT_LOAD_TIMEOUT = 20000  # 20 secondes
 S3_CONFIG = Config(max_pool_connections=50)
 s3_client = boto3.client("s3", region_name="us-east-1", config=S3_CONFIG)
 BUCKET_NAME = "msde-pfe-blobs"  # Assurez-vous que ce bucket existe dans votre compte AWS
+S3_PREFIX = 'cotepara'
 
 def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = None) -> bool:
     """
@@ -396,16 +399,197 @@ async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = No
         logger.info("✅ Scraping completed successfully")
         return all_products
 
+class CoteParaScraper:
+    def __init__(self):
+        self.s3_client = boto3.client('s3', region_name="eu-west-3")
+        self.browser: Optional[Browser] = None
+        self.context = None
+        self.page: Optional[Page] = None
+        self.products = []
+        self.current_page = 1
+        self.max_pages = 1
+        self.is_running = True
+
+    async def init_browser(self):
+        """Initialize the browser with proper configuration."""
+        playwright = await async_playwright().start()
+        self.browser = await playwright.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox']
+        )
+        self.context = await self.browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        )
+        self.page = await self.context.new_page()
+        
+        # Set default timeouts
+        self.page.set_default_timeout(PAGE_TIMEOUT)
+        self.page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+
+    async def close_browser(self):
+        """Close the browser and clean up resources."""
+        if self.browser:
+            await self.browser.close()
+
+    async def navigate_with_retry(self, url: str, max_retries: int = MAX_RETRIES) -> bool:
+        """Navigate to a URL with retry logic."""
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Navigating to {url} (attempt {attempt + 1}/{max_retries})")
+                await self.page.goto(url, wait_until='networkidle')
+                return True
+            except TimeoutError:
+                logger.warning(f"Timeout while navigating to {url} (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+                continue
+            except Exception as e:
+                logger.error(f"Error navigating to {url}: {str(e)}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+                continue
+        return False
+
+    async def get_product_links(self, page_url: str) -> List[str]:
+        """Get all product links from a page with retry logic."""
+        for attempt in range(MAX_RETRIES):
+            try:
+                logger.info(f"Getting product links from {page_url} (attempt {attempt + 1}/{MAX_RETRIES})")
+                await self.navigate_with_retry(page_url)
+                
+                # Wait for product grid to be visible
+                await self.page.wait_for_selector('.product-grid', timeout=PAGE_TIMEOUT)
+                
+                # Get all product links
+                links = await self.page.query_selector_all('.product-grid .product-item a')
+                product_urls = [await link.get_attribute('href') for link in links]
+                
+                logger.info(f"Found {len(product_urls)} product links")
+                return product_urls
+            except TimeoutError:
+                logger.warning(f"Timeout while getting product links (attempt {attempt + 1}/{MAX_RETRIES})")
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+                continue
+            except Exception as e:
+                logger.error(f"Error getting product links: {str(e)}")
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+                continue
+        return []
+
+    async def extract_product_data(self, product_url: str) -> Optional[Dict]:
+        """Extract product data with retry logic."""
+        for attempt in range(MAX_RETRIES):
+            try:
+                logger.info(f"Extracting data from {product_url} (attempt {attempt + 1}/{MAX_RETRIES})")
+                await self.navigate_with_retry(product_url)
+                
+                # Wait for product details to be visible
+                await self.page.wait_for_selector('.product-details', timeout=PAGE_TIMEOUT)
+                
+                # Extract product data
+                product_data = await self.page.evaluate('''() => {
+                    const product = {};
+                    product.name = document.querySelector('.product-name')?.textContent?.trim();
+                    product.price = document.querySelector('.product-price')?.textContent?.trim();
+                    product.description = document.querySelector('.product-description')?.textContent?.trim();
+                    product.url = window.location.href;
+                    return product;
+                }''')
+                
+                if product_data and product_data.get('name'):
+                    logger.info(f"Successfully extracted data for product: {product_data['name']}")
+                    return product_data
+                else:
+                    logger.warning(f"No product data found for {product_url}")
+                    return None
+                    
+            except TimeoutError:
+                logger.warning(f"Timeout while extracting product data (attempt {attempt + 1}/{MAX_RETRIES})")
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+                continue
+            except Exception as e:
+                logger.error(f"Error extracting product data: {str(e)}")
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+                continue
+        return None
+
+    async def process_page(self, page_number: int):
+        """Process a single page of products."""
+        page_url = f"https://cotepara.ma/best-sellers/{page_number}/"
+        logger.info(f"📄 Processing page {page_number}: {page_url}")
+        
+        product_urls = await self.get_product_links(page_url)
+        if not product_urls:
+            logger.warning(f"No product links found on page {page_number}")
+            return
+        
+        for product_url in product_urls:
+            if not self.is_running:
+                break
+                
+            product_data = await self.extract_product_data(product_url)
+            if product_data:
+                self.products.append(product_data)
+                logger.info(f"✅ Added product: {product_data['name']}")
+            
+            # Add a small delay between products
+            await asyncio.sleep(random.uniform(1, 3))
+
+    async def run(self):
+        """Main scraping process."""
+        try:
+            await self.init_browser()
+            self.current_page = 1
+            
+            while self.is_running and self.current_page <= self.max_pages:
+                await self.process_page(self.current_page)
+                self.current_page += 1
+                
+                # Add a delay between pages
+                await asyncio.sleep(random.uniform(2, 5))
+                
+        except Exception as e:
+            logger.error(f"Error during scraping: {str(e)}")
+        finally:
+            await self.close_browser()
+            await self.upload_to_s3()
+
+    async def upload_to_s3(self):
+        """Upload scraped data to S3."""
+        if not self.products:
+            logger.warning("No products to upload")
+            return
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{S3_PREFIX}_{timestamp}.json"
+        
+        try:
+            # Convert products to JSON
+            json_data = json.dumps(self.products, ensure_ascii=False, indent=2)
+            
+            # Upload to S3
+            self.s3_client.put_object(
+                Bucket=BUCKET_NAME,
+                Key=filename,
+                Body=json_data.encode('utf-8'),
+                ContentType='application/json'
+            )
+            
+            logger.info(f"✅ Successfully uploaded {len(self.products)} products to S3: {filename}")
+            
+        except ClientError as e:
+            logger.error(f"Error uploading to S3: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error during S3 upload: {str(e)}")
+
 async def main():
-    """
-    Point d'entrée du script : lance le scraping à partir de la première page.
-    """
-    try:
-        await scrape_all_products(start_page=1)
-    except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
-        raise
+    scraper = CoteParaScraper()
+    await scraper.run()
 
 if __name__ == "__main__":
-    # Exécute le script principal si ce fichier est lancé directement
     asyncio.run(main())
