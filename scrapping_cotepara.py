@@ -404,11 +404,12 @@ class CoteParaScraper:
         self.s3_client = boto3.client('s3', region_name="eu-west-3")
         self.browser: Optional[Browser] = None
         self.context = None
-        self.page: Optional[Page] = None
+        self.pages: List[Page] = []
         self.products = []
         self.current_page = 1
         self.max_pages = 1
         self.is_running = True
+        self.navigation_lock = asyncio.Lock()
 
     async def init_browser(self):
         """Initialize the browser with proper configuration."""
@@ -421,81 +422,100 @@ class CoteParaScraper:
             viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         )
-        self.page = await self.context.new_page()
         
-        # Set default timeouts
-        self.page.set_default_timeout(PAGE_TIMEOUT)
-        self.page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+        # Create multiple pages for concurrent processing
+        for _ in range(CONCURRENT_PAGES):
+            page = await self.context.new_page()
+            page.set_default_timeout(PAGE_TIMEOUT)
+            page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+            self.pages.append(page)
 
     async def close_browser(self):
         """Close the browser and clean up resources."""
         if self.browser:
             await self.browser.close()
 
-    async def navigate_with_retry(self, url: str, max_retries: int = MAX_RETRIES) -> bool:
-        """Navigate to a URL with retry logic."""
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Navigating to {url} (attempt {attempt + 1}/{max_retries})")
-                await self.page.goto(url, wait_until='networkidle')
-                return True
-            except TimeoutError:
-                logger.warning(f"Timeout while navigating to {url} (attempt {attempt + 1}/{max_retries})")
+    async def navigate_with_retry(self, page: Page, url: str, max_retries: int = MAX_RETRIES) -> bool:
+        """Navigate to a URL with retry logic and navigation lock."""
+        async with self.navigation_lock:  # Ensure only one navigation at a time
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Navigating to {url} (attempt {attempt + 1}/{max_retries})")
+                    response = await page.goto(url, wait_until='domcontentloaded')
+                    if response and response.ok:
+                        # Wait for the page to be fully loaded
+                        await page.wait_for_load_state('networkidle', timeout=PAGE_TIMEOUT)
+                        return True
+                    else:
+                        logger.warning(f"Navigation failed with status: {response.status if response else 'No response'}")
+                except TimeoutError:
+                    logger.warning(f"Timeout while navigating to {url} (attempt {attempt + 1}/{max_retries})")
+                except Exception as e:
+                    logger.error(f"Error navigating to {url}: {str(e)}")
+                
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(RETRY_DELAY)
-                continue
-            except Exception as e:
-                logger.error(f"Error navigating to {url}: {str(e)}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(RETRY_DELAY)
-                continue
-        return False
+                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))  # Exponential backoff
+            return False
 
-    async def get_product_links(self, page_url: str) -> List[str]:
+    async def get_product_links(self, page: Page, page_url: str) -> List[str]:
         """Get all product links from a page with retry logic."""
         for attempt in range(MAX_RETRIES):
             try:
                 logger.info(f"Getting product links from {page_url} (attempt {attempt + 1}/{MAX_RETRIES})")
-                await self.navigate_with_retry(page_url)
+                if not await self.navigate_with_retry(page, page_url):
+                    continue
                 
                 # Wait for product grid to be visible
-                await self.page.wait_for_selector('.product-grid', timeout=PAGE_TIMEOUT)
+                await page.wait_for_selector('.product-grid', timeout=PAGE_TIMEOUT)
                 
                 # Get all product links
-                links = await self.page.query_selector_all('.product-grid .product-item a')
-                product_urls = [await link.get_attribute('href') for link in links]
+                links = await page.query_selector_all('.product-grid .product-item a')
+                product_urls = []
+                for link in links:
+                    href = await link.get_attribute('href')
+                    if href:
+                        product_urls.append(href)
                 
                 logger.info(f"Found {len(product_urls)} product links")
                 return product_urls
-            except TimeoutError:
-                logger.warning(f"Timeout while getting product links (attempt {attempt + 1}/{MAX_RETRIES})")
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY)
-                continue
             except Exception as e:
                 logger.error(f"Error getting product links: {str(e)}")
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY)
-                continue
+                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
         return []
 
-    async def extract_product_data(self, product_url: str) -> Optional[Dict]:
+    async def extract_product_data(self, page: Page, product_url: str) -> Optional[Dict]:
         """Extract product data with retry logic."""
         for attempt in range(MAX_RETRIES):
             try:
                 logger.info(f"Extracting data from {product_url} (attempt {attempt + 1}/{MAX_RETRIES})")
-                await self.navigate_with_retry(product_url)
+                if not await self.navigate_with_retry(page, product_url):
+                    continue
                 
                 # Wait for product details to be visible
-                await self.page.wait_for_selector('.product-details', timeout=PAGE_TIMEOUT)
+                await page.wait_for_selector('.product-details', timeout=PAGE_TIMEOUT)
                 
-                # Extract product data
-                product_data = await self.page.evaluate('''() => {
-                    const product = {};
-                    product.name = document.querySelector('.product-name')?.textContent?.trim();
-                    product.price = document.querySelector('.product-price')?.textContent?.trim();
-                    product.description = document.querySelector('.product-description')?.textContent?.trim();
-                    product.url = window.location.href;
+                # Extract product data with more robust selectors
+                product_data = await page.evaluate('''() => {
+                    const getText = (selector) => {
+                        const element = document.querySelector(selector);
+                        return element ? element.textContent.trim() : null;
+                    };
+                    
+                    const product = {
+                        name: getText('.product-name') || getText('h1'),
+                        price: getText('.product-price') || getText('.price'),
+                        description: getText('.product-description') || getText('.description'),
+                        url: window.location.href
+                    };
+                    
+                    // Additional data if available
+                    const sku = getText('.sku');
+                    if (sku) product.sku = sku;
+                    
+                    const brand = getText('.brand');
+                    if (brand) product.brand = brand;
+                    
                     return product;
                 }''')
                 
@@ -506,16 +526,10 @@ class CoteParaScraper:
                     logger.warning(f"No product data found for {product_url}")
                     return None
                     
-            except TimeoutError:
-                logger.warning(f"Timeout while extracting product data (attempt {attempt + 1}/{MAX_RETRIES})")
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY)
-                continue
             except Exception as e:
                 logger.error(f"Error extracting product data: {str(e)}")
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY)
-                continue
+                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
         return None
 
     async def process_page(self, page_number: int):
@@ -523,7 +537,10 @@ class CoteParaScraper:
         page_url = f"https://cotepara.ma/best-sellers/{page_number}/"
         logger.info(f"📄 Processing page {page_number}: {page_url}")
         
-        product_urls = await self.get_product_links(page_url)
+        # Use a dedicated page for this task
+        page = self.pages[page_number % CONCURRENT_PAGES]
+        
+        product_urls = await self.get_product_links(page, page_url)
         if not product_urls:
             logger.warning(f"No product links found on page {page_number}")
             return
@@ -532,7 +549,7 @@ class CoteParaScraper:
             if not self.is_running:
                 break
                 
-            product_data = await self.extract_product_data(product_url)
+            product_data = await self.extract_product_data(page, product_url)
             if product_data:
                 self.products.append(product_data)
                 logger.info(f"✅ Added product: {product_data['name']}")
