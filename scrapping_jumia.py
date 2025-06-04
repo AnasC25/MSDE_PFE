@@ -1,7 +1,6 @@
 from datetime import datetime
 import logging
 import os
-import tempfile
 import time
 import traceback
 
@@ -11,7 +10,6 @@ import psutil
 from botocore.config import Config
 from bs4 import BeautifulSoup
 from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -32,92 +30,22 @@ BUCKET_NAME = "msde-pfe-blobs"
 
 def open_browser():
     try:
-        # Create a dedicated temp directory for Chrome
-        chrome_temp_dir = os.path.join(os.path.expanduser("~"), "chrome_temp")
-        os.makedirs(chrome_temp_dir, exist_ok=True)
-        
         chrome_options = Options()
-        # Configuration de base
         chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument(f'--user-data-dir={chrome_temp_dir}')
-        
-        # Additional stability options for EC2
         chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--disable-software-rasterizer')
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-dev-tools')
-        chrome_options.add_argument('--disable-logging')
-        chrome_options.add_argument('--disable-notifications')
-        chrome_options.add_argument('--disable-popup-blocking')
-        chrome_options.add_argument('--disable-infobars')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        
-        # Memory management
-        chrome_options.add_argument('--disable-application-cache')
-        chrome_options.add_argument('--disable-background-networking')
-        chrome_options.add_argument('--disable-background-timer-throttling')
-        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
-        chrome_options.add_argument('--disable-breakpad')
-        chrome_options.add_argument('--disable-component-extensions-with-background-pages')
-        chrome_options.add_argument('--disable-features=TranslateUI,BlinkGenPropertyTrees')
-        chrome_options.add_argument('--disable-ipc-flooding-protection')
-        chrome_options.add_argument('--disable-renderer-backgrounding')
-        
-        # Window and display
         chrome_options.add_argument('--window-size=1920,1080')
-        chrome_options.add_argument('--start-maximized')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-notifications')
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         
-        # Security and certificates
-        chrome_options.add_argument('--ignore-certificate-errors')
-        chrome_options.add_argument('--allow-running-insecure-content')
-        chrome_options.add_argument('--disable-web-security')
-        
-        # User agent
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        
-        # Performance optimizations
-        chrome_options.add_argument('--disk-cache-size=1')
-        chrome_options.add_argument('--media-cache-size=1')
-        chrome_options.add_argument('--disable-images')
-        chrome_options.add_argument('--js-flags=--max-old-space-size=512')
-        chrome_options.add_argument('--disable-javascript')
-        
-        # Experimental options
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        
-        # Page load strategy
-        chrome_options.page_load_strategy = 'eager'
-        
-        # Create service with increased logging
-        service = Service("/usr/local/bin/chromedriver", log_path="/dev/null")
-        
-        # Create driver with increased timeouts
+        service = Service("/usr/local/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(30)
-        driver.set_script_timeout(30)
-        
-        # Wait for browser to be ready
-        time.sleep(2)
-        
-        # Try to execute script with retry
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise
-                logger.warning(f"Retry {attempt + 1}/{max_retries} for webdriver script")
-                time.sleep(2)
-        
         return driver
     except Exception as e:
         logger.error(f"Erreur navigateur : {e}")
-        logger.error(traceback.format_exc())
         raise
 
 def get_product_links(browser, category_url):
@@ -126,7 +54,6 @@ def get_product_links(browser, category_url):
         all_product_links = set()
         current_page = 1
         max_pages = 50
-        max_retries = 3
 
         while current_page <= max_pages:
             if psutil.virtual_memory().percent > 85:
@@ -136,43 +63,18 @@ def get_product_links(browser, category_url):
             page_url = f"{category_url}?page={current_page}" if current_page > 1 else category_url
             logger.info(f"Page {current_page} : {page_url}")
             
-            retry_count = 0
-            while retry_count < max_retries:
-                try:
-                    browser.get(page_url)
-                    time.sleep(5)
-                    
-                    # Wait for page load with increased timeout
-                    WebDriverWait(browser, 20).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, "a.core[href*='.html']"))
-                    )
-                    break
-                except Exception as e:
-                    retry_count += 1
-                    logger.warning(f"Tentative {retry_count}/{max_retries} échouée : {str(e)}")
-                    if retry_count == max_retries:
-                        logger.error(f"Échec après {max_retries} tentatives pour {page_url}")
-                        current_page += 1
-                        break
-                    
-                    # Restart browser on failure
-                    try:
-                        browser.quit()
-                    except:
-                        pass
-                    browser = open_browser()
-                    time.sleep(5)
-                    continue
-
-            if retry_count == max_retries:
-                continue
-
             try:
+                browser.get(page_url)
+                time.sleep(3)
+                
+                WebDriverWait(browser, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "a.core[href*='.html']"))
+                )
+                
                 soup = BeautifulSoup(browser.page_source, "lxml")
                 links = set()
                 for sel in ["article.prd._fb._spn.c-prd.col a.core", "article.prd a.core", "a.core[href*='.html']"]:
                     elements = soup.select(sel)
-                    logger.info(f"{len(elements)} éléments avec {sel}")
                     for el in elements:
                         href = el.get("href")
                         if href and not href.startswith("http"):
@@ -186,29 +88,28 @@ def get_product_links(browser, category_url):
                 all_product_links.update(links)
                 logger.info(f"Total cumulé : {len(all_product_links)} liens")
 
-                if current_page % 3 == 0:  # Restart browser more frequently (every 3 pages)
-                    logger.info("♻️ Redémarrage du navigateur pour vider mémoire...")
+                if current_page % 3 == 0:
+                    logger.info("♻️ Redémarrage du navigateur...")
                     browser.quit()
                     browser = open_browser()
 
                 current_page += 1
-                time.sleep(2)
+                time.sleep(1)
             except Exception as e:
-                logger.error(f"Erreur lors du parsing de la page {current_page}: {e}")
+                logger.error(f"Erreur page {current_page}: {e}")
                 current_page += 1
                 continue
 
         return list(sorted(all_product_links))
     except Exception as e:
         logger.error(f"Erreur dans get_product_links : {e}")
-        logger.error(traceback.format_exc())
         return []
 
 def get_product_details(url, browser):
     try:
         logger.info(f"Details produit : {url}")
         browser.get(url)
-        time.sleep(2)
+        time.sleep(1)
         WebDriverWait(browser, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "-fs20")))
 
         soup = BeautifulSoup(browser.page_source, "lxml")
@@ -241,10 +142,12 @@ def upload_to_s3(file_path):
 
 def main():
     logger.info("🚀 SCRAPING JUMIA LANCÉ")
-    browser = open_browser()
-
+    browser = None
+    
     try:
+        browser = open_browser()
         all_products = []
+        
         for cat_url in ["https://www.jumia.ma/beaute-hygiene-sante/"]:
             links = get_product_links(browser, cat_url)
             for idx, link in enumerate(links, 1):
@@ -252,7 +155,7 @@ def main():
                 data = get_product_details(link, browser)
                 if data:
                     all_products.append(data)
-                time.sleep(1.5)
+                time.sleep(1)
 
         if all_products:
             df = pd.DataFrame(all_products)
@@ -264,8 +167,14 @@ def main():
             upload_to_s3(path)
         else:
             logger.warning("❌ Aucun produit trouvé")
+    except Exception as e:
+        logger.error(f"Erreur dans le scraping : {e}")
     finally:
-        browser.quit()
+        if browser:
+            try:
+                browser.quit()
+            except:
+                pass
 
     logger.info("🏁 FIN DU SCRAPING")
 
