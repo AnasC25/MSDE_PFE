@@ -6,6 +6,7 @@ from typing import List, Dict
 from playwright.async_api import async_playwright, Browser, Page, TimeoutError
 import boto3
 from botocore.exceptions import ClientError
+import csv
 
 # Configuration du logging
 logging.basicConfig(
@@ -192,19 +193,33 @@ class CoteParaScraper:
             # Save to JSON file
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f"cotepara_products_{timestamp}.json"
+            csv_filename = f"cotepara_products_{timestamp}.csv"
             
             logger.info(f"💾 Sauvegarde des données dans {filename}")
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(self.products, f, ensure_ascii=False, indent=2)
-            
             logger.info(f"✅ {len(self.products)} produits sauvegardés avec succès")
+
+            # Save to CSV file
+            logger.info(f"💾 Sauvegarde des données dans {csv_filename}")
+            with open(csv_filename, 'w', encoding='utf-8', newline='') as csvfile:
+                if self.products:
+                    writer = csv.DictWriter(csvfile, fieldnames=self.products[0].keys())
+                    writer.writeheader()
+                    writer.writerows(self.products)
+            logger.info(f"✅ {len(self.products)} produits sauvegardés en CSV avec succès")
             
-            # Upload to S3
+            # Upload to S3 (JSON)
             logger.info("📤 Début de l'upload vers S3...")
             if self.upload_to_s3(filename):
                 logger.info("✅ Upload S3 terminé avec succès")
             else:
                 logger.error("❌ Échec de l'upload S3")
+            # Upload to S3 (CSV)
+            if self.upload_to_s3(csv_filename):
+                logger.info("✅ Upload CSV S3 terminé avec succès")
+            else:
+                logger.error("❌ Échec de l'upload CSV S3")
             
         except TimeoutError as e:
             logger.error(f"❌ Timeout pendant le scraping: {str(e)}")
