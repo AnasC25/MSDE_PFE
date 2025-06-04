@@ -33,12 +33,12 @@ BUCKET_NAME = "msde-pfe-blobs"
 def open_browser():
     try:
         chrome_options = Options()
-        # Basic options
+        # Configuration de base
         chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         
-        # Memory and performance options
+        # Optimisations de performance
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--disable-software-rasterizer')
         chrome_options.add_argument('--disable-extensions')
@@ -49,7 +49,7 @@ def open_browser():
         chrome_options.add_argument('--disable-infobars')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         
-        # Memory management
+        # Gestion de la mémoire
         chrome_options.add_argument('--disable-application-cache')
         chrome_options.add_argument('--disable-background-networking')
         chrome_options.add_argument('--disable-background-timer-throttling')
@@ -60,34 +60,39 @@ def open_browser():
         chrome_options.add_argument('--disable-ipc-flooding-protection')
         chrome_options.add_argument('--disable-renderer-backgrounding')
         
-        # Window and display
+        # Fenêtre et affichage
         chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--start-maximized')
         
-        # Security and certificates
+        # Sécurité et certificats
         chrome_options.add_argument('--ignore-certificate-errors')
         chrome_options.add_argument('--allow-running-insecure-content')
         chrome_options.add_argument('--disable-web-security')
         
-        # User agent and automation
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        chrome_options.add_argument(f'--user-data-dir={tempfile.mkdtemp()}')
+        # User agent et automation
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         
-        # Additional experimental options
+        # Désactiver le cache et les images pour améliorer les performances
+        chrome_options.add_argument('--disk-cache-size=1')
+        chrome_options.add_argument('--media-cache-size=1')
+        chrome_options.add_argument('--disable-images')
+        
+        # Options expérimentales
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        # Set page load strategy
+        # Stratégie de chargement de page
         chrome_options.page_load_strategy = 'eager'
         
+        # Créer le service avec le chemin vers chromedriver
         service = Service("/usr/local/bin/chromedriver")
-        driver = webdriver.Chrome(service=service, options=chrome_options)
         
-        # Set timeouts
+        # Créer le driver avec des timeouts augmentés
+        driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(30)
         driver.set_script_timeout(30)
         
-        # Mask webdriver
+        # Masquer webdriver
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
         return driver
