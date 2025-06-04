@@ -22,13 +22,13 @@ logger = logging.getLogger(__name__)
 
 # Constantes de configuration du script
 FILENAME = "produits_Scrapper.csv"  # Nom du fichier CSV de sortie
-MAX_CONCURRENT_REQUESTS = 3  # Réduit de 5 à 3 pour réduire la charge
-MAX_RETRIES = 8  # Nombre de tentatives en cas d'échec réseau
-TIMEOUT = 120000  # Augmenté à 120 secondes
-PAGE_LOAD_TIMEOUT = 90000  # Augmenté à 90 secondes
-RETRY_DELAY = 20  # Augmenté à 20 secondes
-BATCH_SIZE = 3  # Réduit à 3 pour réduire la charge
-PRODUCT_LOAD_TIMEOUT = 30000  # Timeout pour le chargement des éléments produit
+MAX_CONCURRENT_REQUESTS = 10  # Augmenté pour accélérer le scraping
+MAX_RETRIES = 3  # Limité pour éviter les attentes longues
+TIMEOUT = 30000  # Timeout général réduit à 30 secondes
+PAGE_LOAD_TIMEOUT = 15000  # Timeout page à 15 secondes
+RETRY_DELAY = 5  # Retry delay réduit à 5 secondes
+BATCH_SIZE = 10  # Plus de produits traités en parallèle
+PRODUCT_LOAD_TIMEOUT = 10000  # Timeout pour les éléments produit à 10 secondes
 
 # Configuration AWS S3
 S3_CONFIG = Config(max_pool_connections=50)
@@ -375,10 +375,10 @@ async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = No
 
                     logger.info(f"🧺 Page {page_number}: Found {len(valid_products)} products in batch. Total: {total_products_scraped}")
                     
-                    await asyncio.sleep(random.uniform(3.0, 6.0))
+                    await asyncio.sleep(random.uniform(0.5, 1.0))
 
                 page_number += 1
-                await asyncio.sleep(random.uniform(5.0, 8.0))
+                await asyncio.sleep(random.uniform(1.0, 2.0))
 
         finally:
             try:
