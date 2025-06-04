@@ -33,7 +33,7 @@ PRODUCT_LOAD_TIMEOUT = 30000  # Timeout pour le chargement des éléments produi
 # Configuration AWS S3
 S3_CONFIG = Config(max_pool_connections=50)
 s3_client = boto3.client("s3", config=S3_CONFIG)
-BUCKET_NAME = "msde-pfe-blobs"
+BUCKET_NAME = "msde-pfe-blobs"  # Assurez-vous que ce bucket existe dans votre compte AWS
 
 def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = None) -> bool:
     """
@@ -51,10 +51,28 @@ def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = N
         object_name = os.path.basename(file_path)
 
     try:
+        # Vérifier si le bucket existe
+        try:
+            s3_client.head_bucket(Bucket=bucket)
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            if error_code == '404':
+                logger.error(f"❌ Le bucket {bucket} n'existe pas")
+                return False
+            elif error_code == '403':
+                logger.error(f"❌ Accès refusé au bucket {bucket}")
+                return False
+            else:
+                raise
+
+        # Construction de la clé S3
         key = f"cotepara/products/{object_name}"
+        
+        # Upload du fichier
         s3_client.upload_file(file_path, bucket, key)
-        logger.info(f"✅ Upload S3 : s3://{bucket}/{key}")
+        logger.info(f"✅ Upload S3 réussi : s3://{bucket}/{key}")
         return True
+        
     except ClientError as e:
         logger.error(f"❌ Erreur lors de l'upload vers S3: {e}")
         return False
@@ -95,13 +113,16 @@ def save_to_csv(products: List[Dict], filename: str) -> None:
         # Upload vers S3
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         s3_object_name = f"products_{timestamp}.csv"
-        if upload_to_s3(filename, s3_object_name):
-            logger.info(f"✅ Fichier uploadé vers S3 avec succès: {s3_object_name}")
+        
+        # Tentative d'upload avec gestion d'erreur
+        if not upload_to_s3(filename, BUCKET_NAME, s3_object_name):
+            logger.warning("⚠️ L'upload vers S3 a échoué, mais les données sont sauvegardées localement")
         else:
-            logger.error("❌ Échec de l'upload vers S3")
+            logger.info(f"✅ Fichier uploadé vers S3 avec succès: {s3_object_name}")
 
     except Exception as e:
         logger.error(f"❌ Error saving to CSV: {e}")
+        raise
 
 async def wait_for_network_idle(page, timeout=15000):
     """
