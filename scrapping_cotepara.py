@@ -375,8 +375,6 @@ async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = No
 
                     logger.info(f"🧺 Page {page_number}: Found {len(valid_products)} products in batch. Total: {total_products_scraped}")
                     
-                    save_to_csv(all_products, FILENAME)
-                    
                     await asyncio.sleep(random.uniform(3.0, 6.0))
 
                 page_number += 1
@@ -389,6 +387,8 @@ async def scrape_all_products(start_page: int = 1, max_pages: Optional[int] = No
             except Exception as e:
                 logger.warning(f"Error closing browser: {e}")
 
+        # Upload unique à la fin du scraping
+        save_to_csv(all_products, FILENAME)
         logger.info("✅ Scraping completed successfully")
         return all_products
 
