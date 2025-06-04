@@ -64,6 +64,11 @@ def get_product_links(browser, category_url):
             logger.info(f"Page {current_page} : {page_url}")
             
             try:
+                # Vérifier si la session est toujours valide
+                if not browser.session_id:
+                    logger.info("Session invalide, redémarrage du navigateur...")
+                    browser = open_browser()
+                
                 browser.get(page_url)
                 time.sleep(3)
                 
@@ -100,13 +105,18 @@ def get_product_links(browser, category_url):
                 current_page += 1
                 continue
 
-        return list(sorted(all_product_links))
+        return list(sorted(all_product_links)), browser
     except Exception as e:
         logger.error(f"Erreur dans get_product_links : {e}")
-        return []
+        return [], browser
 
 def get_product_details(url, browser):
     try:
+        # Vérifier si la session est toujours valide
+        if not browser.session_id:
+            logger.info("Session invalide, redémarrage du navigateur...")
+            browser = open_browser()
+            
         logger.info(f"Details produit : {url}")
         browser.get(url)
         time.sleep(1)
@@ -127,10 +137,10 @@ def get_product_details(url, browser):
             "image_url": img['src'] if img and 'src' in img.attrs else "Non disponible",
             "lien_produit": url,
             "date_extraction": datetime.now()
-        }
+        }, browser
     except Exception as e:
         logger.warning(f"Erreur produit : {e}")
-        return None
+        return None, browser
 
 def upload_to_s3(file_path):
     try:
@@ -149,10 +159,10 @@ def main():
         all_products = []
         
         for cat_url in ["https://www.jumia.ma/beaute-hygiene-sante/"]:
-            links = get_product_links(browser, cat_url)
+            links, browser = get_product_links(browser, cat_url)
             for idx, link in enumerate(links, 1):
                 logger.info(f"[{idx}/{len(links)}] Scraping produit")
-                data = get_product_details(link, browser)
+                data, browser = get_product_details(link, browser)
                 if data:
                     all_products.append(data)
                 time.sleep(1)
@@ -176,7 +186,7 @@ def main():
             except:
                 pass
 
-    logger.info("🏁 FIN DU SCRAPING")
+    logger.info("�� FIN DU SCRAPING")
 
 if __name__ == "__main__":
     main()
