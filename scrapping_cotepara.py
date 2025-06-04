@@ -22,12 +22,13 @@ logger = logging.getLogger(__name__)
 
 # Constantes de configuration du script
 FILENAME = "produits_Scrapper.csv"  # Nom du fichier CSV de sortie
-MAX_CONCURRENT_REQUESTS = 5  # Réduit de 30 à 5 pour éviter la surcharge
+MAX_CONCURRENT_REQUESTS = 3  # Réduit de 5 à 3 pour réduire la charge
 MAX_RETRIES = 8  # Nombre de tentatives en cas d'échec réseau
-TIMEOUT = 90000  # Timeout général en millisecondes
-PAGE_LOAD_TIMEOUT = 60000  # Timeout pour le chargement d'une page
-RETRY_DELAY = 15  # Augmenté de 10 à 15 secondes
-BATCH_SIZE = 5  # Réduit de 10 à 5 pour réduire la charge
+TIMEOUT = 120000  # Augmenté à 120 secondes
+PAGE_LOAD_TIMEOUT = 90000  # Augmenté à 90 secondes
+RETRY_DELAY = 20  # Augmenté à 20 secondes
+BATCH_SIZE = 3  # Réduit à 3 pour réduire la charge
+PRODUCT_LOAD_TIMEOUT = 30000  # Timeout pour le chargement des éléments produit
 
 # Configuration AWS S3
 S3_CONFIG = Config(max_pool_connections=50)
@@ -102,7 +103,7 @@ def save_to_csv(products: List[Dict], filename: str) -> None:
     except Exception as e:
         logger.error(f"❌ Error saving to CSV: {e}")
 
-async def wait_for_network_idle(page, timeout=10000):
+async def wait_for_network_idle(page, timeout=15000):
     """
     Attend que le réseau soit inactif (plus de chargement de ressources).
     """
@@ -110,6 +111,8 @@ async def wait_for_network_idle(page, timeout=10000):
         await page.wait_for_load_state("networkidle", timeout=timeout)
     except TimeoutError:
         logger.warning("Network idle timeout, continuing anyway")
+        # Attendre un peu plus longtemps pour s'assurer que la page est chargée
+        await asyncio.sleep(2)
 
 async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_products: int, current_index: int) -> Optional[Dict]:
     """
@@ -120,17 +123,30 @@ async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_prod
             product_page = None
             try:
                 # Pause plus longue entre les tentatives
-                await asyncio.sleep(random.uniform(3, 7))
+                await asyncio.sleep(random.uniform(5, 10))
                 
                 # Création d'une nouvelle page pour chaque requête
                 product_page = await page.context.new_page()
                 try:
-                    response = await product_page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
-                    if not response:
-                        raise PlaywrightError("No response received")
-                    if response.status >= 400:
-                        raise PlaywrightError(f"HTTP {response.status}")
-                    await wait_for_network_idle(product_page)
+                    # Configuration des timeouts pour cette page
+                    product_page.set_default_timeout(PRODUCT_LOAD_TIMEOUT)
+                    
+                    # Navigation vers la page avec retry
+                    for nav_attempt in range(3):
+                        try:
+                            response = await product_page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                            if not response:
+                                raise PlaywrightError("No response received")
+                            if response.status >= 400:
+                                raise PlaywrightError(f"HTTP {response.status}")
+                            await wait_for_network_idle(product_page)
+                            break
+                        except Exception as e:
+                            if nav_attempt == 2:
+                                raise
+                            await asyncio.sleep(5)
+                            continue
+                            
                 except PlaywrightError as e:
                     if any(err in str(e) for err in ["net::ERR_ABORTED", "net::ERR_CONNECTION_RESET", "net::ERR_CONNECTION_TIMED_OUT"]):
                         logger.warning(f"Network error on attempt {attempt + 1}/{MAX_RETRIES} for {url}")
@@ -139,30 +155,46 @@ async def scrape_product_detail(page, url: str, semaphore: Semaphore, total_prod
                             continue
                     raise
 
-                # Attente de l'élément titre du produit
-                try:
-                    await product_page.wait_for_selector(".product_title", timeout=15000)
-                except TimeoutError:
-                    logger.warning(f"Timeout waiting for product title on {url}")
-                    if attempt < MAX_RETRIES - 1:
-                        continue
-                    return None
+                # Attente de l'élément titre du produit avec retry
+                title_found = False
+                for title_attempt in range(3):
+                    try:
+                        await product_page.wait_for_selector(".product_title", timeout=PRODUCT_LOAD_TIMEOUT)
+                        title_found = True
+                        break
+                    except TimeoutError:
+                        if title_attempt < 2:
+                            logger.warning(f"Retrying title load for {url} (attempt {title_attempt + 1}/3)")
+                            await asyncio.sleep(5)
+                            continue
+                        logger.warning(f"Timeout waiting for product title on {url}")
+                        if attempt < MAX_RETRIES - 1:
+                            break
+                        return None
 
-                # Récupération des différents éléments de la page produit
-                try:
-                    title_elem, description_elem, normal_price_elem, promo_price_elem, image_elem = await asyncio.gather(
-                        product_page.query_selector(".product_title"),
-                        product_page.query_selector(".woocommerce-Tabs-panel--description"),
-                        product_page.query_selector(".price del .woocommerce-Price-amount"),
-                        product_page.query_selector(".price ins .woocommerce-Price-amount"),
-                        product_page.query_selector(".woocommerce-product-gallery__image img"),
-                        return_exceptions=True
-                    )
-                except Exception as e:
-                    logger.error(f"Error querying elements: {e}")
-                    if attempt < MAX_RETRIES - 1:
+                if not title_found:
+                    continue
+
+                # Récupération des différents éléments de la page produit avec retry
+                for elements_attempt in range(3):
+                    try:
+                        title_elem, description_elem, normal_price_elem, promo_price_elem, image_elem = await asyncio.gather(
+                            product_page.query_selector(".product_title"),
+                            product_page.query_selector(".woocommerce-Tabs-panel--description"),
+                            product_page.query_selector(".price del .woocommerce-Price-amount"),
+                            product_page.query_selector(".price ins .woocommerce-Price-amount"),
+                            product_page.query_selector(".woocommerce-product-gallery__image img"),
+                            return_exceptions=True
+                        )
+                        break
+                    except Exception as e:
+                        if elements_attempt == 2:
+                            logger.error(f"Error querying elements: {e}")
+                            if attempt < MAX_RETRIES - 1:
+                                break
+                            return None
+                        await asyncio.sleep(5)
                         continue
-                    return None
 
                 # Extraction du texte de chaque élément (ou chaîne vide si absent)
                 title = await title_elem.inner_text() if title_elem and not isinstance(title_elem, Exception) else ""
