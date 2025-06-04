@@ -11,6 +11,7 @@ import time
 import boto3
 import os
 from botocore.exceptions import ClientError
+from botocore.config import Config
 
 # Configuration du système de logs pour afficher des messages d'information et d'erreur
 logging.basicConfig(
@@ -29,12 +30,11 @@ RETRY_DELAY = 15  # Augmenté de 10 à 15 secondes
 BATCH_SIZE = 5  # Réduit de 10 à 5 pour réduire la charge
 
 # Configuration AWS S3
-AWS_ACCESS_KEY = os.getenv('AWS_ACCESS_KEY_ID')  # Utilisation des variables d'environnement
-AWS_SECRET_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-AWS_REGION = os.getenv('AWS_REGION', 'eu-west-3')
-S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
+S3_CONFIG = Config(max_pool_connections=50)
+s3_client = boto3.client("s3", config=S3_CONFIG)
+BUCKET_NAME = "msde-pfe-blobs"
 
-def upload_to_s3(file_path: str, bucket: str, object_name: str = None) -> bool:
+def upload_to_s3(file_path: str, bucket: str = BUCKET_NAME, object_name: str = None) -> bool:
     """
     Upload un fichier vers un bucket S3.
     
@@ -46,24 +46,13 @@ def upload_to_s3(file_path: str, bucket: str, object_name: str = None) -> bool:
     Returns:
         bool: True si l'upload a réussi, False sinon
     """
-    if not all([AWS_ACCESS_KEY, AWS_SECRET_KEY, bucket]):
-        logger.warning("⚠️ Configuration AWS manquante, skip upload S3")
-        return False
-
     if object_name is None:
         object_name = os.path.basename(file_path)
 
-    # Création du client S3
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-        region_name=AWS_REGION
-    )
-
     try:
-        s3_client.upload_file(file_path, bucket, object_name)
-        logger.info(f"✅ Fichier {file_path} uploadé avec succès vers s3://{bucket}/{object_name}")
+        key = f"cotepara/products/{object_name}"
+        s3_client.upload_file(file_path, bucket, key)
+        logger.info(f"✅ Upload S3 : s3://{bucket}/{key}")
         return True
     except ClientError as e:
         logger.error(f"❌ Erreur lors de l'upload vers S3: {e}")
@@ -105,7 +94,7 @@ def save_to_csv(products: List[Dict], filename: str) -> None:
         # Upload vers S3
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         s3_object_name = f"products_{timestamp}.csv"
-        if upload_to_s3(filename, S3_BUCKET_NAME, s3_object_name):
+        if upload_to_s3(filename, s3_object_name):
             logger.info(f"✅ Fichier uploadé vers S3 avec succès: {s3_object_name}")
         else:
             logger.error("❌ Échec de l'upload vers S3")
@@ -357,10 +346,6 @@ async def main():
     Point d'entrée du script : lance le scraping à partir de la première page.
     """
     try:
-        # Vérification de la configuration AWS
-        if not all([AWS_ACCESS_KEY, AWS_SECRET_KEY, S3_BUCKET_NAME]):
-            logger.warning("⚠️ Configuration AWS incomplète, l'upload S3 sera désactivé")
-        
         await scrape_all_products(start_page=1)
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
