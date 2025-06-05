@@ -20,7 +20,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
 # Logging config
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Folders & S3
@@ -74,7 +74,7 @@ def get_product_links(browser, category_url, max_pages=50):
         logger.info(f"Page {current_page} : {page_url}")
         try:
             browser.get(page_url)
-            WebDriverWait(browser, 15).until(
+            WebDriverWait(browser, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "a.core[href*='.html']"))
             )
             soup = BeautifulSoup(browser.page_source, "lxml")
@@ -91,11 +91,9 @@ def get_product_links(browser, category_url, max_pages=50):
             before = len(all_product_links)
             all_product_links.update(links)
             logger.info(f"Liens trouvés cette page : {len(links)} | Total cumulé : {len(all_product_links)} (+{len(all_product_links)-before})")
-            time.sleep(random.uniform(0.5, 2.0))
+            time.sleep(random.uniform(0.2, 0.7))
         except TimeoutException as e:
-            logger.error(f"Timeout on page {current_page}: {e}. Restarting browser and retrying...")
-            browser.quit()
-            browser = open_browser()
+            logger.warning(f"Timeout on page {current_page}: {e}. Page ignorée.")
             continue
         except Exception as e:
             logger.error(f"Erreur page {current_page}: {e}")
