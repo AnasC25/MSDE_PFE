@@ -30,25 +30,26 @@ Marjanemall est la marketplace du Groupe Marjane, lancée dans le cadre de sa st
   - Prix barré
   - URL de l'image
   - Date d'extraction
+- Sauvegarde des résultats au format CSV et Excel dans le dossier `jumia_products/`
+- Upload automatique des fichiers vers AWS S3
 
 ### Scraping CotePara
 - Scraping asynchrone pour une meilleure performance
 - Collecte détaillée des informations produits :
   - Titre
-  - Description
-  - Prix normal
-  - Prix promotionnel
-  - URL de l'image
+  - Prix
+  - Ancien prix
+  - Réduction
   - Score de popularité
+- Sauvegarde des résultats au format CSV et JSON (fichiers nommés `cotepara_products_YYYYMMDD_HHMMSS.csv` et `.json`)
+- Upload automatique des fichiers vers AWS S3
 - Gestion avancée des erreurs et retries
-- Traitement par lots pour optimiser les performances
 
 ## Fonctionnalités Communes
-- Sauvegarde automatique des données au format Excel/CSV
+- Sauvegarde automatique des données au format Excel/CSV/JSON
 - Intégration avec AWS S3 pour le stockage des données
 - Système de logging complet
 - Gestion des erreurs et reprise sur erreur
-- Sauvegarde intermédiaire des données
 
 ## Architecture Technique
 
@@ -58,14 +59,14 @@ Le projet est composé de deux scripts principaux :
    - Utilise Selenium pour l'automatisation
    - Extraction des liens produits
    - Gestion de la pagination
-   - Sauvegarde intermédiaire des données
+   - Sauvegarde des données dans `jumia_products/`
    - Upload vers AWS S3
 
 2. `scrapping_cotepara.py` :
    - Utilise Playwright pour l'automatisation asynchrone
    - Extraction des détails produits
-   - Traitement par lots
    - Gestion avancée des erreurs
+   - Sauvegarde des données localement (CSV/JSON)
    - Upload vers AWS S3
 
 ## Méthodologie de Développement
@@ -87,7 +88,7 @@ Le projet suit une approche Agile avec :
 
 - Python 3.x
 - Chrome Browser
-- ChromeDriver (pour Jumia)
+- ChromeDriver (pour Jumia) — le fichier `chromedriver.exe` est inclus pour Windows
 - Playwright (pour CotePara)
 - Compte AWS avec accès S3
 
@@ -121,12 +122,12 @@ aws_secret_access_key = VOTRE_SECRET_KEY
 
 ```
 .
-├── jumia_products/          # Dossier contenant les données Jumia
-├── produits_Scrapper.csv    # Fichier de sortie CotePara
-├── scrapping_jumia.py       # Script pour Jumia
-├── scrapping_cotepara.py    # Script pour CotePara
-├── requirements.txt         # Liste des dépendances Python
-└── README.md               # Documentation
+├── jumia_products/                # Dossier contenant les données Jumia (CSV, XLSX)
+├── chromedriver.exe               # ChromeDriver pour Windows (Jumia)
+├── scrapping_jumia.py             # Script pour Jumia
+├── scrapping_cotepara.py          # Script pour CotePara
+├── requirements.txt               # Liste des dépendances Python
+└── README.md                      # Documentation
 ```
 
 ## Utilisation
@@ -138,7 +139,7 @@ python scrapping_jumia.py
 Le script va :
 - Parcourir les pages de produits
 - Extraire les liens
-- Sauvegarder les données localement
+- Sauvegarder les données dans `jumia_products/`
 - Uploader les données vers S3
 
 ### Scraping CotePara
@@ -148,7 +149,7 @@ python scrapping_cotepara.py
 Le script va :
 - Parcourir les pages de produits de manière asynchrone
 - Extraire les détails de chaque produit
-- Sauvegarder les résultats localement
+- Sauvegarder les résultats localement (CSV/JSON)
 - Uploader les données vers S3
 
 ## Dépendances Principales
@@ -172,10 +173,9 @@ Le script va :
 - User-Agent personnalisé
 
 ### CotePara
-- Scraping asynchrone avec gestion de concurrence
-- Traitement par lots avec sémaphore
+- Scraping asynchrone avec gestion des timeouts et retries
 - Gestion avancée des erreurs réseau
-- Système de retry intelligent
+- Système de scoring des produits
 
 ## Notes
 

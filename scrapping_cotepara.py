@@ -7,6 +7,7 @@ from playwright.async_api import async_playwright, Browser, Page, TimeoutError
 import boto3
 from botocore.exceptions import ClientError
 import csv
+from concurrent.futures import ThreadPoolExecutor
 
 # Configuration du logging
 logging.basicConfig(
@@ -237,7 +238,8 @@ async def main():
     scraper = CoteParaScraper()
     try:
         await scraper.init_browser()
-        await scraper.scrape_products()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            await scraper.scrape_products()
     except Exception as e:
         logger.error(f"❌ Erreur fatale: {str(e)}")
     finally:
@@ -261,3 +263,20 @@ if __name__ == "__main__":
                 loop.close()
         except Exception as e:
             logger.error(f"❌ Erreur lors de la fermeture de l'event loop: {str(e)}")
+
+def scrape_products_batch(links):
+    driver = open_browser()
+    results = []
+    try:
+        for link in links:
+            result = get_product_details(link, driver)
+            if result:
+                results.append(result)
+    finally:
+        driver.quit()
+    return results
+
+def chunked(iterable, n):
+    """Découpe une liste en sous-listes de taille n."""
+    for i in range(0, len(iterable), n):
+        yield iterable[i:i + n]
