@@ -38,10 +38,14 @@ def open_browser():
     chrome_options.add_argument('--window-size=1920,1080')
     chrome_options.add_argument('--disable-extensions')
     chrome_options.add_argument('--disable-notifications')
+    chrome_options.add_argument('--disable-background-networking')
+    chrome_options.add_argument('--disable-sync')
+    chrome_options.add_argument('--no-first-run')
+    chrome_options.add_argument('--disable-translate')
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     service = Service("/usr/local/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(30)
+    driver.set_page_load_timeout(60)
     return driver
 
 def upload_to_s3(file_path, s3_prefix="jumia/products"):
@@ -136,7 +140,7 @@ def main():
             links = get_product_links(browser, cat_url)
         browser.quit()
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_url = {executor.submit(scrape_product_wrapper, url): url for url in links}
             for idx, future in enumerate(as_completed(future_to_url), 1):
                 url = future_to_url[future]
