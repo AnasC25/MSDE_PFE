@@ -94,7 +94,7 @@ def get_product_links(browser, category_url, max_pages=50):
 def get_product_details(url, browser, retry=2):
     for attempt in range(retry):
         try:
-            logger.info(f"Details produit : {url}")
+            logger.info(f"Ouverture du produit : {url}")
             browser.get(url)
             time.sleep(1)
             WebDriverWait(browser, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "-fs20")))
@@ -145,7 +145,7 @@ def main():
             for idx, future in enumerate(as_completed(future_to_url), 1):
                 url = future_to_url[future]
                 try:
-                    result = future.result()
+                    result = future.result(timeout=60)
                     if result:
                         all_products.append(result)
                         logger.info(f"[{idx}/{len(links)}] ✅ {url}")
