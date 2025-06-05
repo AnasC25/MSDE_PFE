@@ -4,6 +4,7 @@ import os
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
 
 import boto3
 import pandas as pd
@@ -16,6 +17,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import TimeoutException
 
 # Logging config
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -45,7 +47,7 @@ def open_browser():
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     service = Service("/usr/local/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(60)
+    driver.set_page_load_timeout(120)
     return driver
 
 def upload_to_s3(file_path, s3_prefix="jumia/products"):
@@ -89,7 +91,12 @@ def get_product_links(browser, category_url, max_pages=50):
             before = len(all_product_links)
             all_product_links.update(links)
             logger.info(f"Liens trouvés cette page : {len(links)} | Total cumulé : {len(all_product_links)} (+{len(all_product_links)-before})")
-            time.sleep(0.2)
+            time.sleep(random.uniform(0.5, 2.0))
+        except TimeoutException as e:
+            logger.error(f"Timeout on page {current_page}: {e}. Restarting browser and retrying...")
+            browser.quit()
+            browser = open_browser()
+            continue
         except Exception as e:
             logger.error(f"Erreur page {current_page}: {e}")
             continue
