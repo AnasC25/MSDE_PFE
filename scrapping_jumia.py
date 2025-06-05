@@ -56,18 +56,22 @@ def upload_to_s3(file_path, s3_prefix="jumia/products"):
     except Exception as e:
         logger.error(f"❌ Échec upload S3 : {e}")
 
+def chunked(iterable, n):
+    """Découpe une liste en sous-listes de taille n."""
+    for i in range(0, len(iterable), n):
+        yield iterable[i:i + n]
+
 def get_product_links(browser, category_url, max_pages=50):
     logger.info(f"Récupération des liens depuis : {category_url}")
     all_product_links = set()
     for current_page in range(1, max_pages + 1):
         if psutil.virtual_memory().percent > 90:
-            logger.warning("⚠️ Mémoire saturée, pause 30s...")
-            time.sleep(30)
+            logger.warning("⚠️ Mémoire saturée, pause 10s...")
+            time.sleep(10)
         page_url = f"{category_url}?page={current_page}" if current_page > 1 else category_url
         logger.info(f"Page {current_page} : {page_url}")
         try:
             browser.get(page_url)
-            time.sleep(2)
             WebDriverWait(browser, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "a.core[href*='.html']"))
             )
@@ -85,7 +89,7 @@ def get_product_links(browser, category_url, max_pages=50):
             before = len(all_product_links)
             all_product_links.update(links)
             logger.info(f"Liens trouvés cette page : {len(links)} | Total cumulé : {len(all_product_links)} (+{len(all_product_links)-before})")
-            time.sleep(1)
+            time.sleep(0.2)
         except Exception as e:
             logger.error(f"Erreur page {current_page}: {e}")
             continue
@@ -96,7 +100,6 @@ def get_product_details(url, browser, retry=2):
         try:
             logger.info(f"Ouverture du produit : {url}")
             browser.get(url)
-            time.sleep(1)
             WebDriverWait(browser, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "-fs20")))
             soup = BeautifulSoup(browser.page_source, "lxml")
             def extract(sel):
@@ -114,21 +117,23 @@ def get_product_details(url, browser, retry=2):
             }
         except Exception as e:
             logger.warning(f"Erreur produit (tentative {attempt+1}/{retry}): {e}")
-            time.sleep(2)
+            time.sleep(0.5)
     return None
 
-def scrape_product_wrapper(link):
+def scrape_products_batch(links):
     driver = open_browser()
+    batch_results = []
     try:
-        return get_product_details(link, driver)
-    except Exception as e:
-        logger.warning(f"Erreur thread pour {link} : {e}")
-        return None
+        for link in links:
+            try:
+                result = get_product_details(link, driver)
+                if result:
+                    batch_results.append(result)
+            except Exception as e:
+                logger.warning(f"Erreur scraping pour {link} : {e}")
     finally:
-        try:
-            driver.quit()
-        except:
-            pass
+        driver.quit()
+    return batch_results
 
 def main():
     logger.info("🚀 SCRAPING JUMIA LANCÉ")
@@ -140,22 +145,24 @@ def main():
             links = get_product_links(browser, cat_url)
         browser.quit()
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_url = {executor.submit(scrape_product_wrapper, url): url for url in links}
-            for idx, future in enumerate(as_completed(future_to_url), 1):
-                url = future_to_url[future]
-                try:
-                    result = future.result(timeout=60)
-                    if result:
-                        all_products.append(result)
-                        logger.info(f"[{idx}/{len(links)}] ✅ {url}")
-                    else:
-                        logger.warning(f"[{idx}/{len(links)}] ❌ Échec pour {url}")
-                except Exception as e:
-                    logger.error(f"[{idx}/{len(links)}] ❌ Exception sur {url} : {e}")
+        # Découper les liens en lots de 30
+        batches = list(chunked(links, 30))
+        logger.info(f"Nombre de lots de 30 produits : {len(batches)}")
 
-        if all_products:
-            df = pd.DataFrame(all_products)
+        # Paralléliser le scraping des lots
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(scrape_products_batch, batch) for batch in batches]
+            all_results = []
+            for idx, future in enumerate(as_completed(futures), 1):
+                try:
+                    batch_result = future.result()
+                    all_results.extend(batch_result)
+                    logger.info(f"Lot {idx}/{len(batches)} terminé, {len(batch_result)} produits scrapés.")
+                except Exception as e:
+                    logger.error(f"Erreur dans un lot : {e}")
+
+        if all_results:
+            df = pd.DataFrame(all_results)
             df["score"] = range(len(df), 0, -1)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_xlsx = f"jumia_products_{timestamp}.xlsx"
@@ -172,12 +179,6 @@ def main():
     except Exception as e:
         logger.error(f"Erreur dans le scraping : {e}")
         traceback.print_exc()
-    finally:
-        if browser:
-            try:
-                browser.quit()
-            except:
-                pass
     logger.info("🏁 FIN DU SCRAPING")
 
 if __name__ == "__main__":
