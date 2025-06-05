@@ -132,7 +132,10 @@ def scrape_products_batch(links):
             except Exception as e:
                 logger.warning(f"Erreur scraping pour {link} : {e}")
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception as e:
+            logger.error(f"Erreur lors de la fermeture du navigateur : {e}")
     return batch_results
 
 def main():
@@ -145,21 +148,16 @@ def main():
             links = get_product_links(browser, cat_url)
         browser.quit()
 
-        # Découper les liens en lots de 30
-        batches = list(chunked(links, 30))
-        logger.info(f"Nombre de lots de 30 produits : {len(batches)}")
+        # Découper les liens en lots de 50
+        batches = list(chunked(links, 50))
+        logger.info(f"Nombre de lots de 50 produits : {len(batches)}")
 
-        # Paralléliser le scraping des lots
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(scrape_products_batch, batch) for batch in batches]
-            all_results = []
-            for idx, future in enumerate(as_completed(futures), 1):
-                try:
-                    batch_result = future.result()
-                    all_results.extend(batch_result)
-                    logger.info(f"Lot {idx}/{len(batches)} terminé, {len(batch_result)} produits scrapés.")
-                except Exception as e:
-                    logger.error(f"Erreur dans un lot : {e}")
+        all_results = []
+        for idx, batch in enumerate(batches, 1):
+            logger.info(f"Traitement du lot {idx}/{len(batches)}...")
+            batch_result = scrape_products_batch(batch)
+            all_results.extend(batch_result)
+            logger.info(f"Lot {idx} terminé, {len(batch_result)} produits scrapés.")
 
         if all_results:
             df = pd.DataFrame(all_results)
