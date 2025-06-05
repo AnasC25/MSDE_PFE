@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
 import pandas as pd
@@ -112,6 +113,19 @@ def get_product_details(url, browser, retry=2):
             time.sleep(2)
     return None
 
+def scrape_product_wrapper(link):
+    driver = open_browser()
+    try:
+        return get_product_details(link, driver)
+    except Exception as e:
+        logger.warning(f"Erreur thread pour {link} : {e}")
+        return None
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
+
 def main():
     logger.info("🚀 SCRAPING JUMIA LANCÉ")
     browser = None
@@ -120,12 +134,22 @@ def main():
         all_products = []
         for cat_url in ["https://www.jumia.ma/beaute-hygiene-sante/"]:
             links = get_product_links(browser, cat_url)
-            for idx, link in enumerate(links, 1):
-                logger.info(f"[{idx}/{len(links)}] Scraping produit")
-                data = get_product_details(link, browser)
-                if data:
-                    all_products.append(data)
-                time.sleep(0.5)
+        browser.quit()
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_url = {executor.submit(scrape_product_wrapper, url): url for url in links}
+            for idx, future in enumerate(as_completed(future_to_url), 1):
+                url = future_to_url[future]
+                try:
+                    result = future.result()
+                    if result:
+                        all_products.append(result)
+                        logger.info(f"[{idx}/{len(links)}] ✅ {url}")
+                    else:
+                        logger.warning(f"[{idx}/{len(links)}] ❌ Échec pour {url}")
+                except Exception as e:
+                    logger.error(f"[{idx}/{len(links)}] ❌ Exception sur {url} : {e}")
+
         if all_products:
             df = pd.DataFrame(all_products)
             df["score"] = range(len(df), 0, -1)
@@ -148,7 +172,7 @@ def main():
         if browser:
             try:
                 browser.quit()
-            except Exception:
+            except:
                 pass
     logger.info("🏁 FIN DU SCRAPING")
 
