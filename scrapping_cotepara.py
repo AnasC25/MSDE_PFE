@@ -25,13 +25,14 @@ BUCKET_NAME = 'msde-pfe-blobs'
 S3_PREFIX = 'cotepara'
 
 # Configuration des timeouts
-PAGE_TIMEOUT = 5000  # 180 secondes
-NAVIGATION_TIMEOUT = 180000  # 180 secondes
-SELECTOR_TIMEOUT = 120000  # 120 secondes
+PAGE_TIMEOUT = 30000  # 30 secondes
+NAVIGATION_TIMEOUT = 60000  # 60 secondes
+SELECTOR_TIMEOUT = 30000  # 30 secondes
 
 class CoteParaScraper:
     def __init__(self):
         self.browser: Browser = None
+        self.context = None
         self.products: List[Dict] = []
         self.base_url = "https://cotepara.ma/best-sellers/1/"
         self.s3_client = boto3.client('s3', region_name=AWS_REGION)
@@ -46,7 +47,7 @@ class CoteParaScraper:
         logger.info(f"⏱️ {action}: {elapsed:.2f} secondes")
 
     async def init_browser(self):
-        """Initialize the browser."""
+        """Initialize the browser and context."""
         try:
             logger.info("🌐 Démarrage du navigateur...")
             start = time.time()
@@ -61,6 +62,12 @@ class CoteParaScraper:
                     '--disable-gpu'
                 ]
             )
+            # Create a new context with specific settings
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent=self.user_agent,
+                ignore_https_errors=True
+            )
             elapsed = time.time() - start
             logger.info(f"✅ Navigateur démarré avec succès en {elapsed:.2f} secondes")
         except Exception as e:
@@ -68,7 +75,13 @@ class CoteParaScraper:
             raise
 
     async def close_browser(self):
-        """Close the browser."""
+        """Close the browser and context."""
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception as e:
+                logger.error(f"❌ Erreur lors de la fermeture du contexte: {str(e)}")
+        
         if self.browser:
             try:
                 logger.info("🔒 Fermeture du navigateur...")
@@ -167,19 +180,19 @@ class CoteParaScraper:
             logger.info("🔄 Démarrage du scraping des produits...")
             start_total = time.time()
             
-            page = await self.browser.new_page()
+            # Create a new page from the context
+            page = await self.context.new_page()
             page.set_default_timeout(PAGE_TIMEOUT)
             page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
-            
-            # Set user agent
-            await page.set_extra_http_headers({
-                "User-Agent": self.user_agent
-            })
             
             logger.info(f"🌐 Navigation vers {self.base_url}")
             try:
                 start_nav = time.time()
-                response = await page.goto(self.base_url, wait_until='networkidle')
+                response = await page.goto(
+                    self.base_url,
+                    wait_until='domcontentloaded',
+                    timeout=NAVIGATION_TIMEOUT
+                )
                 elapsed_nav = time.time() - start_nav
                 logger.info(f"⏱️ Navigation vers la page: {elapsed_nav:.2f} secondes")
                 
@@ -192,32 +205,23 @@ class CoteParaScraper:
                 return
             
             logger.info("⏳ Attente du chargement des produits...")
-            start_load = time.time()    
-            # Multiple attempts to find products
+            
+            # Wait for the page to be fully loaded
+            await page.wait_for_load_state('networkidle', timeout=SELECTOR_TIMEOUT)
+            
+            # Wait for products with retry mechanism
             max_attempts = 3
             for attempt in range(max_attempts):
                 try:
-                    start_load = time.time()
-                    # Wait for network to be idle
-                    await page.wait_for_load_state('networkidle')
-                    elapsed_load = time.time() - start_load
-                    logger.info(f"⏱️ Chargement des produits: {elapsed_load:.2f} secondes")
-                    # Wait for products with increasing timeout
-                    start_load = time.time()        
                     await page.wait_for_selector('.porto-tb-item.product', timeout=SELECTOR_TIMEOUT)
-                    elapsed_load = time.time() - start_load
-                    logger.info(f"⏱️ Chargement des produits: {elapsed_load:.2f} secondes")
                     break
                 except TimeoutError:
                     if attempt < max_attempts - 1:
                         logger.warning(f"⚠️ Tentative {attempt + 1}/{max_attempts} échouée, nouvelle tentative...")
-                        # Try to reload the page
-                        await page.reload(wait_until='networkidle')
+                        await page.reload(wait_until='domcontentloaded')
                         continue
                     else:
                         raise
-            elapsed_load = time.time() - start_load
-            logger.info(f"⏱️ Chargement des produits: {elapsed_load:.2f} secondes")
             
             # Get all products
             products = await page.query_selector_all('.porto-tb-item.product')
@@ -337,8 +341,7 @@ async def main():
     scraper = CoteParaScraper()
     try:
         await scraper.init_browser()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            await scraper.scrape_products()
+        await scraper.scrape_products()
     except Exception as e:
         logger.error(f"❌ Erreur fatale: {str(e)}")
     finally:
@@ -352,16 +355,6 @@ if __name__ == "__main__":
         logger.info("⚠️ Script interrompu par l'utilisateur")
     except Exception as e:
         logger.error(f"❌ Erreur fatale: {str(e)}")
-    finally:
-        # Nettoyage de l'event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.stop()
-            if not loop.is_closed():
-                loop.close()
-        except Exception as e:
-            logger.error(f"❌ Erreur lors de la fermeture de l'event loop: {str(e)}")
 
 def scrape_products_batch(links):
     driver = open_browser()
