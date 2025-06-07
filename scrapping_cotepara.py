@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 import csv
 from concurrent.futures import ThreadPoolExecutor
 import io
+import time
 
 # Configuration du logging
 logging.basicConfig(
@@ -35,12 +36,20 @@ class CoteParaScraper:
         self.base_url = "https://cotepara.ma/best-sellers/1/"
         self.s3_client = boto3.client('s3', region_name=AWS_REGION)
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        self.start_time = time.time()
         logger.info("🚀 Initialisation du scraper CotePara")
+
+    def log_time(self, action: str):
+        """Log the time taken for an action."""
+        current_time = time.time()
+        elapsed = current_time - self.start_time
+        logger.info(f"⏱️ {action}: {elapsed:.2f} secondes")
 
     async def init_browser(self):
         """Initialize the browser."""
         try:
             logger.info("🌐 Démarrage du navigateur...")
+            start = time.time()
             playwright = await async_playwright().start()
             self.browser = await playwright.chromium.launch(
                 headless=True,
@@ -52,7 +61,8 @@ class CoteParaScraper:
                     '--disable-gpu'
                 ]
             )
-            logger.info("✅ Navigateur démarré avec succès")
+            elapsed = time.time() - start
+            logger.info(f"✅ Navigateur démarré avec succès en {elapsed:.2f} secondes")
         except Exception as e:
             logger.error(f"❌ Erreur lors du démarrage du navigateur: {str(e)}")
             raise
@@ -62,8 +72,10 @@ class CoteParaScraper:
         if self.browser:
             try:
                 logger.info("🔒 Fermeture du navigateur...")
+                start = time.time()
                 await self.browser.close()
-                logger.info("✅ Navigateur fermé avec succès")
+                elapsed = time.time() - start
+                logger.info(f"✅ Navigateur fermé avec succès en {elapsed:.2f} secondes")
             except Exception as e:
                 logger.error(f"❌ Erreur lors de la fermeture du navigateur: {str(e)}")
 
@@ -71,6 +83,7 @@ class CoteParaScraper:
         """Upload a file to S3 bucket."""
         try:
             logger.info(f"📤 Début de l'upload vers S3: {file_path}")
+            start = time.time()
             
             # Check if bucket exists
             try:
@@ -99,7 +112,8 @@ class CoteParaScraper:
                 s3_key
             )
             
-            logger.info(f"✅ Upload S3 réussi: s3://{BUCKET_NAME}/{s3_key}")
+            elapsed = time.time() - start
+            logger.info(f"✅ Upload S3 réussi: s3://{BUCKET_NAME}/{s3_key} en {elapsed:.2f} secondes")
             return True
             
         except ClientError as e:
@@ -113,6 +127,8 @@ class CoteParaScraper:
         """Upload a buffer to S3 bucket."""
         try:
             logger.info(f"📤 Début de l'upload vers S3 (buffer): {filename}")
+            start = time.time()
+            
             # Check if bucket exists
             try:
                 self.s3_client.head_bucket(Bucket=BUCKET_NAME)
@@ -134,7 +150,8 @@ class CoteParaScraper:
                 s3_key,
                 ExtraArgs={"ContentType": content_type}
             )
-            logger.info(f"✅ Upload S3 réussi: s3://{BUCKET_NAME}/{s3_key}")
+            elapsed = time.time() - start
+            logger.info(f"✅ Upload S3 réussi: s3://{BUCKET_NAME}/{s3_key} en {elapsed:.2f} secondes")
             return True
         except ClientError as e:
             logger.error(f"❌ Erreur lors de l'upload S3: {str(e)}")
@@ -148,6 +165,8 @@ class CoteParaScraper:
         page = None
         try:
             logger.info("🔄 Démarrage du scraping des produits...")
+            start_total = time.time()
+            
             page = await self.browser.new_page()
             page.set_default_timeout(PAGE_TIMEOUT)
             page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
@@ -159,7 +178,11 @@ class CoteParaScraper:
             
             logger.info(f"🌐 Navigation vers {self.base_url}")
             try:
+                start_nav = time.time()
                 response = await page.goto(self.base_url, wait_until='networkidle')
+                elapsed_nav = time.time() - start_nav
+                logger.info(f"⏱️ Navigation vers la page: {elapsed_nav:.2f} secondes")
+                
                 if not response:
                     raise Exception("Failed to get response from page")
                 if response.status != 200:
@@ -172,6 +195,7 @@ class CoteParaScraper:
             
             # Multiple attempts to find products
             max_attempts = 3
+            start_load = time.time()
             for attempt in range(max_attempts):
                 try:
                     # Wait for network to be idle
@@ -188,6 +212,8 @@ class CoteParaScraper:
                         continue
                     else:
                         raise
+            elapsed_load = time.time() - start_load
+            logger.info(f"⏱️ Chargement des produits: {elapsed_load:.2f} secondes")
             
             # Get all products
             products = await page.query_selector_all('.porto-tb-item.product')
@@ -198,9 +224,11 @@ class CoteParaScraper:
                 return
             
             # Process each product
+            start_scraping = time.time()
             for index, product in enumerate(products):
                 try:
                     logger.info(f"🔄 Traitement du produit {index + 1}/{len(products)}")
+                    start_product = time.time()
                     
                     # Extract product data with retry
                     for attempt in range(3):
@@ -228,7 +256,8 @@ class CoteParaScraper:
                                 "score": score
                             })
                             
-                            logger.info(f"✅ Produit scrapé: {title_text.strip()}")
+                            elapsed_product = time.time() - start_product
+                            logger.info(f"✅ Produit scrapé: {title_text.strip()} en {elapsed_product:.2f} secondes")
                             logger.info(f"💰 Prix: {price_text.strip()}")
                             if old_price_text.strip() != "N/A":
                                 logger.info(f"💲 Prix barré: {old_price_text.strip()}")
@@ -250,16 +279,22 @@ class CoteParaScraper:
                     logger.error(f"❌ Erreur lors du scraping du produit {index + 1}: {str(e)}")
                     continue
             
+            elapsed_scraping = time.time() - start_scraping
+            logger.info(f"⏱️ Temps total de scraping des produits: {elapsed_scraping:.2f} secondes")
+            
             if not self.products:
                 logger.warning("⚠️ Aucun produit n'a été scrapé")
                 return
             
             # Création du buffer CSV en mémoire
             logger.info("📝 Création du buffer CSV en mémoire...")
+            start_csv = time.time()
             csv_buffer = io.StringIO()
             csv_writer = csv.DictWriter(csv_buffer, fieldnames=['title', 'price', 'old_price', 'discount', 'score'])
             csv_writer.writeheader()
             csv_writer.writerows(self.products)
+            elapsed_csv = time.time() - start_csv
+            logger.info(f"⏱️ Création du CSV: {elapsed_csv:.2f} secondes")
             
             # Génération du nom de fichier avec timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -278,6 +313,9 @@ class CoteParaScraper:
             # Nettoyage des buffers
             csv_buffer.close()
             csv_bytes_buffer.close()
+            
+            elapsed_total = time.time() - start_total
+            logger.info(f"⏱️ Temps total d'exécution: {elapsed_total:.2f} secondes")
             
         except TimeoutError as e:
             logger.error(f"❌ Timeout pendant le scraping: {str(e)}")
