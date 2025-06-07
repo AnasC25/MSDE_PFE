@@ -226,38 +226,30 @@ class CoteParaScraper:
                 logger.warning("⚠️ Aucun produit n'a été scrapé")
                 return
             
-            # Save to JSON buffer
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"cotepara_products_{timestamp}.json"
-            csv_filename = f"cotepara_products_{timestamp}.csv"
-            
-            logger.info(f"💾 Génération du buffer JSON")
-            json_buffer = io.BytesIO()
-            json_bytes = json.dumps(self.products, ensure_ascii=False, indent=2).encode('utf-8')
-            json_buffer.write(json_bytes)
-            
-            # Save to CSV buffer
-            logger.info(f"💾 Génération du buffer CSV")
+            # Création du buffer CSV en mémoire
+            logger.info("📝 Création du buffer CSV en mémoire...")
             csv_buffer = io.StringIO()
-            if self.products:
-                writer = csv.DictWriter(csv_buffer, fieldnames=self.products[0].keys())
-                writer.writeheader()
-                writer.writerows(self.products)
+            csv_writer = csv.DictWriter(csv_buffer, fieldnames=['title', 'price', 'old_price', 'discount', 'score'])
+            csv_writer.writeheader()
+            csv_writer.writerows(self.products)
             
-            # Upload to S3 (JSON)
-            logger.info("📤 Début de l'upload JSON vers S3...")
-            if self.upload_to_s3_buffer(json_buffer, filename, content_type='application/json'):
-                logger.info("✅ Upload JSON S3 terminé avec succès")
-            else:
-                logger.error("❌ Échec de l'upload JSON S3")
+            # Génération du nom de fichier avec timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            csv_filename = f'cotepara_products_{timestamp}.csv'
             
-            # Upload to S3 (CSV)
-            logger.info("📤 Début de l'upload CSV vers S3...")
+            # Conversion du buffer StringIO en BytesIO pour l'upload S3
+            logger.info("📤 Préparation de l'upload vers S3...")
             csv_bytes_buffer = io.BytesIO(csv_buffer.getvalue().encode('utf-8'))
+            
+            # Upload direct vers S3 depuis la mémoire
             if self.upload_to_s3_buffer(csv_bytes_buffer, csv_filename, content_type='text/csv'):
                 logger.info("✅ Upload CSV S3 terminé avec succès")
             else:
                 logger.error("❌ Échec de l'upload CSV S3")
+            
+            # Nettoyage des buffers
+            csv_buffer.close()
+            csv_bytes_buffer.close()
             
         except TimeoutError as e:
             logger.error(f"❌ Timeout pendant le scraping: {str(e)}")
