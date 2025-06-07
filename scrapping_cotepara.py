@@ -192,17 +192,21 @@ class CoteParaScraper:
                 return
             
             logger.info("⏳ Attente du chargement des produits...")
-            
+            start_load = time.time()    
             # Multiple attempts to find products
             max_attempts = 3
-            start_load = time.time()
             for attempt in range(max_attempts):
                 try:
+                    start_load = time.time()
                     # Wait for network to be idle
                     await page.wait_for_load_state('networkidle')
-                    
+                    elapsed_load = time.time() - start_load
+                    logger.info(f"⏱️ Chargement des produits: {elapsed_load:.2f} secondes")
                     # Wait for products with increasing timeout
+                    start_load = time.time()        
                     await page.wait_for_selector('.porto-tb-item.product', timeout=SELECTOR_TIMEOUT)
+                    elapsed_load = time.time() - start_load
+                    logger.info(f"⏱️ Chargement des produits: {elapsed_load:.2f} secondes")
                     break
                 except TimeoutError:
                     if attempt < max_attempts - 1:
