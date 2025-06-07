@@ -1,0 +1,23 @@
+{
+  "name": "msde_pfe",
+  "version": "1.0.0",
+  "description": "Ce projet est un système de scraping web qui collecte des données de produits depuis les sites e-commerce Jumia et CotePara au Maroc.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://AnasC25@github.com/AnasC25/MSDE_PFE.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/AnasC25/MSDE_PFE/issues"
+  },
+  "homepage": "https://github.com/AnasC25/MSDE_PFE#readme",
+  "dependencies": {
+    "@playwright/test": "^1.52.0"
+  }
+}

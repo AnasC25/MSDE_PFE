@@ -1,188 +1,299 @@
-from datetime import datetime
+import asyncio
+import json
 import logging
+from datetime import datetime
+from typing import List, Dict
+from playwright.async_api import async_playwright, Browser, Page, TimeoutError
+import boto3
+from botocore.exceptions import ClientError
+import pandas as pd
 import os
 import time
-import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+import io
 import random
 
-import boto3
-import pandas as pd
-import psutil
-from botocore.config import Config
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
-
-# Logging config
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configuration du logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
-# Folders & S3
-OUTPUT_DIR = "jumia_products"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Configuration AWS
+AWS_REGION = 'us-east-1'
+BUCKET_NAME = 'msde-pfe-blobs'
+S3_PREFIX = 'jumia'
 
-S3_CONFIG = Config(max_pool_connections=50)
-s3_client = boto3.client("s3", config=S3_CONFIG)
-BUCKET_NAME = "msde-pfe-blobs"
+# Configuration des timeouts
+PAGE_TIMEOUT = 5000  # 5 secondes
+NAVIGATION_TIMEOUT = 180000  # 180 secondes
+SELECTOR_TIMEOUT = 120000  # 120 secondes
 
-def open_browser():
-    chrome_options = Options()
-    chrome_options.add_argument('--headless=new')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--window-size=1920,1080')
-    chrome_options.add_argument('--disable-extensions')
-    chrome_options.add_argument('--disable-notifications')
-    chrome_options.add_argument('--disable-background-networking')
-    chrome_options.add_argument('--disable-sync')
-    chrome_options.add_argument('--no-first-run')
-    chrome_options.add_argument('--disable-translate')
-    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    service = Service("/usr/local/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(120)
-    return driver
+class JumiaScraper:
+    def __init__(self):
+        self.browser: Browser = None
+        self.products: List[Dict] = []
+        self.base_url = "https://www.jumia.ma/beaute-hygiene-sante/"
+        self.s3_client = boto3.client('s3', region_name=AWS_REGION)
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        self.start_time = time.time()
+        logger.info("🚀 Initialisation du scraper Jumia")
 
-def upload_to_s3(file_path, s3_prefix="jumia/products"):
-    try:
-        key = f"{s3_prefix}/{os.path.basename(file_path)}"
-        s3_client.upload_file(file_path, BUCKET_NAME, key)
-        logger.info(f"✅ Upload S3 : s3://{BUCKET_NAME}/{key}")
-    except Exception as e:
-        logger.error(f"❌ Échec upload S3 : {e}")
+    def log_time(self, action: str):
+        """Log the time taken for an action."""
+        current_time = time.time()
+        elapsed = current_time - self.start_time
+        logger.info(f"⏱️ {action}: {elapsed:.2f} secondes")
 
-def chunked(iterable, n):
-    """Découpe une liste en sous-listes de taille n."""
-    for i in range(0, len(iterable), n):
-        yield iterable[i:i + n]
-
-def get_product_links(browser, category_url, max_pages=50):
-    logger.info(f"Récupération des liens depuis : {category_url}")
-    all_product_links = set()
-    for current_page in range(1, max_pages + 1):
-        if psutil.virtual_memory().percent > 90:
-            logger.warning("⚠️ Mémoire saturée, pause 10s...")
-            time.sleep(10)
-        page_url = f"{category_url}?page={current_page}" if current_page > 1 else category_url
-        logger.info(f"Page {current_page} : {page_url}")
+    async def init_browser(self):
+        """Initialize the browser."""
         try:
-            browser.get(page_url)
-            WebDriverWait(browser, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "a.core[href*='.html']"))
+            logger.info("🌐 Démarrage du navigateur...")
+            start = time.time()
+            playwright = await async_playwright().start()
+            self.browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu'
+                ]
             )
-            soup = BeautifulSoup(browser.page_source, "lxml")
-            links = set()
-            for sel in ["article.prd._fb._spn.c-prd.col a.core", "article.prd a.core", "a.core[href*='.html']"]:
-                for el in soup.select(sel):
-                    href = el.get("href")
-                    if href and not href.startswith("http"):
-                        href = "https://www.jumia.ma" + href
-                    links.add(href)
-            if not links:
-                logger.info("Fin de la pagination.")
-                break
-            before = len(all_product_links)
-            all_product_links.update(links)
-            logger.info(f"Liens trouvés cette page : {len(links)} | Total cumulé : {len(all_product_links)} (+{len(all_product_links)-before})")
-            time.sleep(random.uniform(0.2, 0.7))
-        except TimeoutException as e:
-            logger.warning(f"Timeout on page {current_page}: {e}. Page ignorée.")
-            continue
+            elapsed = time.time() - start
+            logger.info(f"✅ Navigateur démarré avec succès en {elapsed:.2f} secondes")
         except Exception as e:
-            logger.error(f"Erreur page {current_page}: {e}")
-            continue
-    return list(sorted(all_product_links))
+            logger.error(f"❌ Erreur lors du démarrage du navigateur: {str(e)}")
+            raise
 
-def get_product_details(url, browser, retry=2):
-    for attempt in range(retry):
-        try:
-            logger.info(f"Ouverture du produit : {url}")
-            browser.get(url)
-            WebDriverWait(browser, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "-fs20")))
-            soup = BeautifulSoup(browser.page_source, "lxml")
-            def extract(sel):
-                el = soup.select_one(sel)
-                return el.text.strip() if el else "Non disponible"
-            img = soup.select_one("#imgs img")
-            return {
-                "designation": extract("h1.-fs20.-pts.-pbxs"),
-                "marque": extract("#jm > main > div:nth-child(1) > section > div > div.col10 > div.-phs > div.-pvxs"),
-                "prix_vente": extract("span.-b.-ubpt.-tal.-fs24.-prxs"),
-                "prix_barre": extract("span.-tal.-gy5.-lthr.-fs16.-pvxs.-ubpt"),
-                "image_url": img['src'] if img and 'src' in img.attrs else "Non disponible",
-                "lien_produit": url,
-                "date_extraction": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
-        except Exception as e:
-            logger.warning(f"Erreur produit (tentative {attempt+1}/{retry}): {e}")
-            time.sleep(0.5)
-    return None
-
-def scrape_products_batch(links):
-    driver = open_browser()
-    batch_results = []
-    try:
-        for link in links:
+    async def close_browser(self):
+        """Close the browser."""
+        if self.browser:
             try:
-                result = get_product_details(link, driver)
-                if result:
-                    batch_results.append(result)
+                logger.info("🔒 Fermeture du navigateur...")
+                start = time.time()
+                await self.browser.close()
+                elapsed = time.time() - start
+                logger.info(f"✅ Navigateur fermé avec succès en {elapsed:.2f} secondes")
             except Exception as e:
-                logger.warning(f"Erreur scraping pour {link} : {e}")
-    finally:
+                logger.error(f"❌ Erreur lors de la fermeture du navigateur: {str(e)}")
+
+    def upload_to_s3_buffer(self, buffer, filename: str, content_type: str = 'application/octet-stream') -> bool:
+        """Upload a buffer to S3 bucket."""
         try:
-            driver.quit()
+            logger.info(f"📤 Début de l'upload vers S3 (buffer): {filename}")
+            start = time.time()
+            
+            # Check if bucket exists
+            try:
+                self.s3_client.head_bucket(Bucket=BUCKET_NAME)
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                if error_code == '404':
+                    logger.error(f"❌ Le bucket S3 '{BUCKET_NAME}' n'existe pas")
+                    return False
+                elif error_code == '403':
+                    logger.error(f"❌ Accès refusé au bucket S3 '{BUCKET_NAME}'")
+                    return False
+                else:
+                    raise
+            
+            s3_key = f"{S3_PREFIX}/{filename}"
+            buffer.seek(0)
+            self.s3_client.upload_fileobj(
+                buffer,
+                BUCKET_NAME,
+                s3_key,
+                ExtraArgs={"ContentType": content_type}
+            )
+            elapsed = time.time() - start
+            logger.info(f"✅ Upload S3 réussi: s3://{BUCKET_NAME}/{s3_key} en {elapsed:.2f} secondes")
+            return True
         except Exception as e:
-            logger.error(f"Erreur lors de la fermeture du navigateur : {e}")
-    return batch_results
+            logger.error(f"❌ Erreur lors de l'upload S3: {str(e)}")
+            return False
 
-def main():
-    logger.info("🚀 SCRAPING JUMIA LANCÉ")
-    browser = None
-    try:
-        browser = open_browser()
-        all_products = []
-        for cat_url in ["https://www.jumia.ma/beaute-hygiene-sante/"]:
-            links = get_product_links(browser, cat_url)
-        browser.quit()
+    async def get_product_links(self, page: Page, max_pages: int = 50) -> List[str]:
+        """Get all product links from the category pages."""
+        all_links = set()
+        current_page = 1
+        
+        while current_page <= max_pages:
+            try:
+                page_url = f"{self.base_url}?page={current_page}" if current_page > 1 else self.base_url
+                logger.info(f"🌐 Navigation vers la page {current_page}: {page_url}")
+                
+                await page.goto(page_url, wait_until='networkidle')
+                await page.wait_for_selector('a.core[href*=".html"]', timeout=SELECTOR_TIMEOUT)
+                
+                # Extract all product links
+                links = await page.evaluate('''() => {
+                    const links = new Set();
+                    document.querySelectorAll('a.core[href*=".html"]').forEach(a => {
+                        let href = a.href;
+                        if (!href.startsWith('http')) {
+                            href = 'https://www.jumia.ma' + href;
+                        }
+                        links.add(href);
+                    });
+                    return Array.from(links);
+                }''')
+                
+                if not links:
+                    logger.info("Fin de la pagination.")
+                    break
+                
+                before = len(all_links)
+                all_links.update(links)
+                logger.info(f"📦 Liens trouvés cette page : {len(links)} | Total cumulé : {len(all_links)} (+{len(all_links)-before})")
+                
+                # Random delay between requests
+                await asyncio.sleep(random.uniform(0.2, 0.7))
+                current_page += 1
+                
+            except TimeoutError:
+                logger.warning(f"⚠️ Timeout sur la page {current_page}")
+                continue
+            except Exception as e:
+                logger.error(f"❌ Erreur sur la page {current_page}: {str(e)}")
+                continue
+        
+        return list(sorted(all_links))
 
-        # Découper les liens en lots de 50
-        batches = list(chunked(links, 50))
-        logger.info(f"Nombre de lots de 50 produits : {len(batches)}")
+    async def get_product_details(self, page: Page, url: str) -> Dict:
+        """Get product details from a single product page."""
+        try:
+            logger.info(f"🔍 Scraping du produit : {url}")
+            await page.goto(url, wait_until='networkidle')
+            await page.wait_for_selector('h1.-fs20', timeout=SELECTOR_TIMEOUT)
+            
+            # Extract product details
+            product_data = await page.evaluate('''() => {
+                const getText = (selector) => {
+                    const el = document.querySelector(selector);
+                    return el ? el.textContent.trim() : 'Non disponible';
+                };
+                
+                const img = document.querySelector('#imgs img');
+                return {
+                    designation: getText('h1.-fs20.-pts.-pbxs'),
+                    marque: getText('#jm > main > div:nth-child(1) > section > div > div.col10 > div.-phs > div.-pvxs'),
+                    prix_vente: getText('span.-b.-ubpt.-tal.-fs24.-prxs'),
+                    prix_barre: getText('span.-tal.-gy5.-lthr.-fs16.-pvxs.-ubpt'),
+                    image_url: img ? img.src : 'Non disponible',
+                    lien_produit: window.location.href,
+                    date_extraction: new Date().toISOString()
+                };
+            }''')
+            
+            logger.info(f"✅ Produit scrapé : {product_data['designation']}")
+            return product_data
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur lors du scraping du produit {url}: {str(e)}")
+            return None
 
-        all_results = []
-        for idx, batch in enumerate(batches, 1):
-            logger.info(f"Traitement du lot {idx}/{len(batches)}...")
-            batch_result = scrape_products_batch(batch)
-            all_results.extend(batch_result)
-            logger.info(f"Lot {idx} terminé, {len(batch_result)} produits scrapés.")
-
-        if all_results:
-            df = pd.DataFrame(all_results)
-            df["score"] = range(len(df), 0, -1)
+    async def scrape_products(self):
+        """Main scraping function."""
+        page = None
+        try:
+            logger.info("🔄 Démarrage du scraping des produits...")
+            start_total = time.time()
+            
+            page = await self.browser.new_page()
+            page.set_default_timeout(PAGE_TIMEOUT)
+            page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+            
+            # Set user agent
+            await page.set_extra_http_headers({
+                "User-Agent": self.user_agent
+            })
+            
+            # Get all product links
+            links = await self.get_product_links(page)
+            logger.info(f"📦 Total des liens trouvés : {len(links)}")
+            
+            # Process each product
+            for index, link in enumerate(links):
+                try:
+                    product_data = await self.get_product_details(page, link)
+                    if product_data:
+                        # Calculate score (highest for first product, lowest for last)
+                        product_data['score'] = len(links) - index
+                        self.products.append(product_data)
+                except Exception as e:
+                    logger.error(f"❌ Erreur lors du traitement du produit {index + 1}: {str(e)}")
+                    continue
+            
+            if not self.products:
+                logger.warning("⚠️ Aucun produit n'a été scrapé")
+                return
+            
+            # Create DataFrame and save to CSV
+            df = pd.DataFrame(self.products)
+            
+            # Generate filename with timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            file_xlsx = f"jumia_products_{timestamp}.xlsx"
-            file_csv = f"jumia_products_{timestamp}.csv"
-            path_xlsx = os.path.join(OUTPUT_DIR, file_xlsx)
-            path_csv = os.path.join(OUTPUT_DIR, file_csv)
-            df.to_excel(path_xlsx, index=False, engine="openpyxl")
-            df.to_csv(path_csv, index=False, encoding='utf-8')
-            logger.info(f"💾 Fichiers générés : {path_xlsx} et {path_csv}")
-            upload_to_s3(path_xlsx)
-            upload_to_s3(path_csv)
-        else:
-            logger.warning("❌ Aucun produit trouvé")
+            csv_filename = f'jumia_products_{timestamp}.csv'
+            
+            # Save to CSV buffer
+            csv_buffer = io.StringIO()
+            df.to_csv(csv_buffer, index=False, encoding='utf-8')
+            
+            # Convert to bytes for S3 upload
+            csv_bytes_buffer = io.BytesIO(csv_buffer.getvalue().encode('utf-8'))
+            
+            # Upload to S3
+            if self.upload_to_s3_buffer(csv_bytes_buffer, csv_filename, content_type='text/csv'):
+                logger.info("✅ Upload CSV S3 terminé avec succès")
+            else:
+                logger.error("❌ Échec de l'upload CSV S3")
+            
+            # Cleanup
+            csv_buffer.close()
+            csv_bytes_buffer.close()
+            
+            elapsed_total = time.time() - start_total
+            logger.info(f"⏱️ Temps total d'exécution: {elapsed_total:.2f} secondes")
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur pendant le scraping: {str(e)}")
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception as e:
+                    logger.error(f"❌ Erreur lors de la fermeture de la page: {str(e)}")
+
+async def main():
+    logger.info("🚀 Démarrage du script de scraping Jumia")
+    scraper = JumiaScraper()
+    try:
+        await scraper.init_browser()
+        await scraper.scrape_products()
     except Exception as e:
-        logger.error(f"Erreur dans le scraping : {e}")
-        traceback.print_exc()
-    logger.info("🏁 FIN DU SCRAPING")
+        logger.error(f"❌ Erreur fatale: {str(e)}")
+    finally:
+        await scraper.close_browser()
+        logger.info("🏁 Fin du script de scraping")
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("⚠️ Script interrompu par l'utilisateur")
+    except Exception as e:
+        logger.error(f"❌ Erreur fatale: {str(e)}")
+    finally:
+        # Cleanup event loop
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.stop()
+            if not loop.is_closed():
+                loop.close()
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de la fermeture de l'event loop: {str(e)}")
