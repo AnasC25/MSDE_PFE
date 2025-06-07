@@ -24,9 +24,9 @@ BUCKET_NAME = 'msde-pfe-blobs'
 S3_PREFIX = 'cotepara'
 
 # Configuration des timeouts
-PAGE_TIMEOUT = 120000  # 120 secondes
-NAVIGATION_TIMEOUT = 120000  # 120 secondes
-SELECTOR_TIMEOUT = 90000  # 90 secondes
+PAGE_TIMEOUT = 5000  # 180 secondes
+NAVIGATION_TIMEOUT = 180000  # 180 secondes
+SELECTOR_TIMEOUT = 120000  # 120 secondes
 
 class CoteParaScraper:
     def __init__(self):
@@ -34,6 +34,7 @@ class CoteParaScraper:
         self.products: List[Dict] = []
         self.base_url = "https://cotepara.ma/best-sellers/1/"
         self.s3_client = boto3.client('s3', region_name=AWS_REGION)
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         logger.info("🚀 Initialisation du scraper CotePara")
 
     async def init_browser(self):
@@ -151,15 +152,42 @@ class CoteParaScraper:
             page.set_default_timeout(PAGE_TIMEOUT)
             page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
             
+            # Set user agent
+            await page.set_extra_http_headers({
+                "User-Agent": self.user_agent
+            })
+            
             logger.info(f"🌐 Navigation vers {self.base_url}")
-            await page.goto(self.base_url, wait_until='networkidle')
+            try:
+                response = await page.goto(self.base_url, wait_until='networkidle')
+                if not response:
+                    raise Exception("Failed to get response from page")
+                if response.status != 200:
+                    raise Exception(f"Page returned status code {response.status}")
+            except Exception as e:
+                logger.error(f"❌ Erreur lors de la navigation: {str(e)}")
+                return
             
             logger.info("⏳ Attente du chargement des produits...")
-            # Attendre que la page soit complètement chargée
-            await page.wait_for_load_state('networkidle')
             
-            # Attendre que les produits soient visibles
-            await page.wait_for_selector('.porto-tb-item.product', timeout=SELECTOR_TIMEOUT)
+            # Multiple attempts to find products
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    # Wait for network to be idle
+                    await page.wait_for_load_state('networkidle')
+                    
+                    # Wait for products with increasing timeout
+                    await page.wait_for_selector('.porto-tb-item.product', timeout=SELECTOR_TIMEOUT)
+                    break
+                except TimeoutError:
+                    if attempt < max_attempts - 1:
+                        logger.warning(f"⚠️ Tentative {attempt + 1}/{max_attempts} échouée, nouvelle tentative...")
+                        # Try to reload the page
+                        await page.reload(wait_until='networkidle')
+                        continue
+                    else:
+                        raise
             
             # Get all products
             products = await page.query_selector_all('.porto-tb-item.product')
