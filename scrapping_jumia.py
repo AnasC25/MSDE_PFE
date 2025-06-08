@@ -45,7 +45,7 @@ class JumiaScraper:
             
             # Launch browser with additional arguments to bypass Cloudflare
             self.browser = await playwright.chromium.launch(
-                headless=False,  # Set to False to handle Cloudflare challenges
+                headless=True,  # Set to True for headless mode
                 args=[
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -53,7 +53,9 @@ class JumiaScraper:
                     '--disable-accelerated-2d-canvas',
                     '--disable-gpu',
                     '--disable-web-security',
-                    '--disable-features=IsolateOrigins,site-per-process'
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--window-size=1920,1080',
+                    '--start-maximized'
                 ]
             )
             
@@ -92,9 +94,11 @@ class JumiaScraper:
     async def handle_cloudflare_challenge(self, page: Page):
         """Handle Cloudflare challenge if present."""
         try:
+            # Wait for Cloudflare challenge to appear
             challenge_present = await page.wait_for_selector('#challenge-running', timeout=5000)
             if challenge_present:
                 logger.info("🛡️ Cloudflare challenge détecté, attente de la résolution...")
+                # Wait for the challenge to be solved
                 await page.wait_for_selector('#challenge-running', state='hidden', timeout=30000)
                 logger.info("✅ Cloudflare challenge résolu")
         except TimeoutError:
