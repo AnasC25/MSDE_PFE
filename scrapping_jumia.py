@@ -10,11 +10,13 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 import boto3
 import io
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # === Configuration initiale ===
 BASE_URL = "https://www.jumia.ma"
 CATEGORY_URL = f"{BASE_URL}/beaute-hygiene-sante/"
 WAIT_TIME = 3
+MAX_RETRIES = 3
 
 # Configuration AWS
 AWS_REGION = 'us-east-1'
@@ -65,9 +67,31 @@ async def fetch_product_links() -> List[str]:
 
     return links
 
+@retry(stop=stop_after_attempt(MAX_RETRIES), wait=wait_exponential(multiplier=1, min=4, max=10))
+async def fetch_single_product_detail(page, url: str) -> dict:
+    try:
+        await page.goto(url, timeout=60000)
+        await page.wait_for_selector("body", timeout=30000)
+        content = await page.content()
+        soup = BeautifulSoup(content, "lxml")
+
+        name = soup.find("h1", class_="-fs20 -pts -pbxs")
+        price = soup.find("span", class_="-b -ltr -tal -fs24")
+
+        return {
+            "url": url,
+            "nom_du_produit": name.get_text(strip=True) if name else "N/A",
+            "prix": price.get_text(strip=True) if price else "N/A"
+        }
+    except Exception as e:
+        logger.warning(f"⚠️ Échec de la récupération des détails pour {url}: {e}")
+        raise
+
 # === Récupération des détails de produits ===
 async def fetch_product_details(links: List[str]):
     results = []
+    failed_urls = []
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
@@ -76,22 +100,12 @@ async def fetch_product_details(links: List[str]):
         for idx, url in enumerate(links):
             logger.info(f"🔄 Détail produit {idx+1}/{len(links)} : {url}")
             try:
-                await page.goto(url, timeout=60000)
-                await page.wait_for_selector("body", timeout=30000)
-                content = await page.content()
-                soup = BeautifulSoup(content, "lxml")
-
-                name = soup.find("h1", class_="-fs20 -pts -pbxs")
-                price = soup.find("span", class_="-b -ltr -tal -fs24")
-
-                results.append({
-                    "url": url,
-                    "nom_du_produit": name.get_text(strip=True) if name else "N/A",
-                    "prix": price.get_text(strip=True) if price else "N/A"
-                })
+                product_detail = await fetch_single_product_detail(page, url)
+                results.append(product_detail)
                 await asyncio.sleep(2)
             except Exception as e:
-                logger.warning(f"⚠️ Erreur détails produit {idx+1} : {e}")
+                logger.error(f"❌ Échec après {MAX_RETRIES} tentatives pour {url}: {e}")
+                failed_urls.append(url)
                 continue
 
         await browser.close()
@@ -108,6 +122,9 @@ async def fetch_product_details(links: List[str]):
         s3_key = f"{S3_PREFIX}/details/jumia_product_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
         s3_client.upload_fileobj(parquet_buffer, BUCKET_NAME, s3_key)
         logger.info(f"✅ Détails sauvegardés dans S3 : {s3_key}")
+        
+        if failed_urls:
+            logger.warning(f"⚠️ {len(failed_urls)} URLs ont échoué après {MAX_RETRIES} tentatives")
     else:
         logger.warning("❌ Aucun détail récupéré.")
 
