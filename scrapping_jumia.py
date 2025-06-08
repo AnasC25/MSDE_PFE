@@ -43,7 +43,7 @@ async def fetch_product_links() -> List[str]:
             logger.info(f"🔄 Chargement : {url}")
             try:
                 await page.goto(url, timeout=60000)
-                await page.wait_for_selector("article.prd", timeout=30000)
+                await page.wait_for_selector("article.prd", timeout=60000)
                 content = await page.content()
                 soup = BeautifulSoup(content, "lxml")
                 articles = soup.find_all("article", class_="prd")
