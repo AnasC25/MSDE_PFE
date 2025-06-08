@@ -118,7 +118,7 @@ class CoteParaScraper:
             filename = file_path.split('/')[-1]
             
             # Construct the S3 key
-            s3_key = f"{S3_PREFIX}/{filename}"
+            s3_key = f"{S3_PREFIX}/{filename}/eventdate:{datetime.now().strftime('%Y-%m-%d')}"
             
             # Upload the file
             self.s3_client.upload_file(
