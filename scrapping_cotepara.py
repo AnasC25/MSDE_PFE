@@ -6,7 +6,9 @@ from typing import List, Dict
 from playwright.async_api import async_playwright, Browser, Page, TimeoutError
 import boto3
 from botocore.exceptions import ClientError
-import csv
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from concurrent.futures import ThreadPoolExecutor
 import io
 import time
@@ -294,33 +296,33 @@ class CoteParaScraper:
                 logger.warning("⚠️ Aucun produit n'a été scrapé")
                 return
             
-            # Création du buffer CSV en mémoire
-            logger.info("📝 Création du buffer CSV en mémoire...")
-            start_csv = time.time()
-            csv_buffer = io.StringIO()
-            csv_writer = csv.DictWriter(csv_buffer, fieldnames=['title', 'price', 'old_price', 'discount', 'score'])
-            csv_writer.writeheader()
-            csv_writer.writerows(self.products)
-            elapsed_csv = time.time() - start_csv
-            logger.info(f"⏱️ Création du CSV: {elapsed_csv:.2f} secondes")
+            # Création du DataFrame pandas
+            logger.info("📝 Création du DataFrame pandas...")
+            start_df = time.time()
+            df = pd.DataFrame(self.products)
+            elapsed_df = time.time() - start_df
+            logger.info(f"⏱️ Création du DataFrame: {elapsed_df:.2f} secondes")
             
             # Génération du nom de fichier avec timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            csv_filename = f'cotepara_products_{timestamp}.csv'
+            parquet_filename = f'cotepara_products_{timestamp}.parquet'
             
-            # Conversion du buffer StringIO en BytesIO pour l'upload S3
+            # Conversion en buffer Parquet
             logger.info("📤 Préparation de l'upload vers S3...")
-            csv_bytes_buffer = io.BytesIO(csv_buffer.getvalue().encode('utf-8'))
+            parquet_buffer = io.BytesIO()
+            
+            # Écriture du DataFrame en Parquet dans le buffer
+            table = pa.Table.from_pandas(df)
+            pq.write_table(table, parquet_buffer)
             
             # Upload direct vers S3 depuis la mémoire
-            if self.upload_to_s3_buffer(csv_bytes_buffer, csv_filename, content_type='text/csv'):
-                logger.info("✅ Upload CSV S3 terminé avec succès")
+            if self.upload_to_s3_buffer(parquet_buffer, parquet_filename, content_type='application/octet-stream'):
+                logger.info("✅ Upload Parquet S3 terminé avec succès")
             else:
-                logger.error("❌ Échec de l'upload CSV S3")
+                logger.error("❌ Échec de l'upload Parquet S3")
             
-            # Nettoyage des buffers
-            csv_buffer.close()
-            csv_bytes_buffer.close()
+            # Nettoyage du buffer
+            parquet_buffer.close()
             
             elapsed_total = time.time() - start_total
             logger.info(f"⏱️ Temps total d'exécution: {elapsed_total:.2f} secondes")
