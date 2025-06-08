@@ -157,7 +157,7 @@ class CoteParaScraper:
                     return False
                 else:
                     raise
-            s3_key = f"{S3_PREFIX}/{filename}"
+            s3_key = f"{S3_PREFIX}/{filename}/eventdate:{datetime.now().strftime('%Y-%m-%d')}"
             buffer.seek(0)
             self.s3_client.upload_fileobj(
                 buffer,
