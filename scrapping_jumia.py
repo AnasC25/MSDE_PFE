@@ -109,11 +109,18 @@ class JumiaScraper:
         links = []
         current_page = 1
         page = None
+        # Limitation du nombre de produits à scraper (à commenter pour scraper tous les produits)
+        MAX_PRODUCTS = 5
 
         try:
             page = await self.context.new_page()
             
             while True:
+                # Vérification de la limite de produits
+                if len(links) >= MAX_PRODUCTS:
+                    logger.info(f"✅ Limite de {MAX_PRODUCTS} produits atteinte")
+                    break
+
                 url = f"{CATEGORY_URL}?page={current_page}"
                 logger.info(f"🔄 Chargement : {url}")
                 
@@ -135,6 +142,10 @@ class JumiaScraper:
                         break
 
                     for article in articles:
+                        # Vérification de la limite de produits
+                        if len(links) >= MAX_PRODUCTS:
+                            break
+                            
                         a_tag = article.find("a", class_="core")
                         if a_tag and a_tag.get("href"):
                             href = a_tag["href"]
